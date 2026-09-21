@@ -19,10 +19,12 @@ import { AuthError, AuthService, type User } from './auth/service.ts';
 import { BillingService, QuotaError, type Reservation } from './billing/service.ts';
 import { ChatSession } from './chat/session.ts';
 import { loadAppConfig, type AppConfig } from './config.ts';
+import { CreditError, CreditService } from './credits/service.ts';
 import { Database } from './db/database.ts';
 import { loadModelConfig } from './gateway/config.ts';
 import { ModelError, describeModelConfig, type ModelConfig } from './gateway/types.ts';
 import { Library } from './library.ts';
+import { MarketError, MarketService, type MarketSort, type RankingWindow } from './market/service.ts';
 
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const SESSION_COOKIE = 'story_session';
@@ -101,6 +103,23 @@ async function readBody(request: http.IncomingMessage): Promise<Buffer> {
     return Buffer.concat(chunks);
 }
 
+/**
+ * Decode one path segment. A stray `%` is a malformed path rather than a server
+ * fault, so it falls back to the raw text and lets id validation reject it
+ * instead of turning into a 500.
+ */
+function decodeSegment(value: string | undefined): string | undefined {
+    if (value === undefined) {
+        return undefined;
+    }
+
+    try {
+        return decodeURIComponent(value);
+    } catch {
+        return value;
+    }
+}
+
 function statusForError(error: unknown): number {
     const message = error instanceof Error ? error.message : String(error);
 
@@ -170,6 +189,10 @@ export interface ServerContext {
     auth: AuthService | null;
     /** Null in single-user mode. */
     billing: BillingService | null;
+    /** Null in single-user mode: a currency needs accounts. */
+    credits: CreditService | null;
+    /** Null in single-user mode or when the market is switched off. */
+    market: MarketService | null;
     libraryFor: (userId: string) => Library | Promise<Library>;
 }
 
@@ -186,6 +209,8 @@ export function singleUserContext(library: Library, config: AppConfig = loadAppC
         config,
         auth: null,
         billing: null,
+        credits: null,
+        market: null,
         libraryFor: () => library,
     };
 }
@@ -209,6 +234,19 @@ export function createAppContext(config: AppConfig = loadAppConfig()): AppContex
 
     const libraries = new Map<string, Library>();
 
+    // Credits and the market both need accounts (a balance or a public listing with
+    // no one to own it is meaningless), so they only exist in multi-user mode.
+    const credits = config.authRequired
+        ? new CreditService(db, {
+            initialGrant: config.credits.initialGrant,
+            checkinAmount: config.credits.checkinAmount,
+            inviteReward: config.credits.inviteReward,
+            inviteeReward: config.credits.inviteeReward,
+            tokensPerCredit: config.credits.tokensPerCredit,
+        })
+        : null;
+    const market = config.authRequired && config.marketEnabled ? new MarketService(db) : null;
+
     const libraryFor = (userId: string): Library => {
         // Single-user mode points straight at a SillyTavern data directory; with
         // accounts, every user gets their own tree so isolation is a filesystem
@@ -231,6 +269,8 @@ export function createAppContext(config: AppConfig = loadAppConfig()): AppContex
         config,
         auth,
         billing,
+        credits,
+        market,
         libraryFor,
         db,
         close: () => db.close(),
@@ -310,7 +350,18 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                         });
 
                         setSessionCookie(response, result.token, result.expiresAt, request);
-                        return sendJson(response, 201, result);
+
+                        // A new account starts with a small balance, so the first
+                        // conversation does not require a check-in or an invite.
+                        const credits = context.credits;
+                        if (credits !== null && credits.initialGrant > 0) {
+                            credits.grant(result.user.id, credits.initialGrant, 'signup');
+                        }
+
+                        return sendJson(response, 201, {
+                            ...result,
+                            credits: credits === null ? null : { balance: credits.balance(result.user.id) },
+                        });
                     }
 
                     if (method === 'POST' && action === 'login') {
@@ -341,22 +392,79 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
 
                 // ------------------------------------------------------ own account
 
-                if (parts[2] === 'me' && method === 'GET') {
+                if (parts[2] === 'me') {
                     if (user === null) {
                         return sendJson(response, 400, { error: 'auth_disabled', message: 'this server runs without accounts' });
                     }
 
-                    if (parts[3] === 'usage') {
+                    const action = parts[3];
+                    const credits = context.credits;
+
+                    if (method === 'GET' && action === 'usage') {
                         return sendJson(response, 200, {
                             usage: context.billing?.summary(user.id) ?? null,
                             recent: context.billing?.ledgerFor(user.id, 50) ?? [],
                         });
                     }
 
-                    return sendJson(response, 200, {
-                        user,
-                        usage: context.billing?.summary(user.id) ?? null,
-                    });
+                    if (method === 'GET' && action === 'credits') {
+                        if (credits === null) {
+                            return sendJson(response, 400, { error: 'credits_disabled', message: 'this server runs without accounts' });
+                        }
+
+                        return sendJson(response, 200, {
+                            tokensPerCredit: credits.tokensPerCredit,
+                            credits: credits.summary(user.id),
+                        });
+                    }
+
+                    // Idempotent per UTC day: calling it twice pays once.
+                    if (method === 'POST' && action === 'checkin') {
+                        if (credits === null) {
+                            return sendJson(response, 400, { error: 'credits_disabled', message: 'this server runs without accounts' });
+                        }
+
+                        const result = credits.checkin(user.id);
+                        return sendJson(response, 200, { ...result, credits: credits.summary(user.id) });
+                    }
+
+                    if (action === 'invites') {
+                        if (credits === null) {
+                            return sendJson(response, 400, { error: 'credits_disabled', message: 'this server runs without accounts' });
+                        }
+
+                        if (method === 'GET') {
+                            return sendJson(response, 200, { invites: credits.listInvites(user.id) });
+                        }
+
+                        if (method === 'POST' && parts[4] === 'redeem') {
+                            const body = JSON.parse((await readBody(request)).toString('utf8') || '{}') as { code?: string };
+                            const result = credits.redeemInvite(user.id, String(body.code ?? ''));
+                            return sendJson(response, 200, { ...result, credits: credits.summary(user.id) });
+                        }
+
+                        if (method === 'POST') {
+                            const body = JSON.parse((await readBody(request)).toString('utf8') || '{}') as { count?: number };
+                            const codes = credits.createInvite(user.id, Number(body.count ?? 1));
+                            return sendJson(response, 201, { codes });
+                        }
+                    }
+
+                    if (method === 'GET' && action === 'favorites') {
+                        if (context.market === null) {
+                            return sendJson(response, 400, { error: 'market_disabled', message: 'the character market is not enabled on this server' });
+                        }
+
+                        return sendJson(response, 200, { characters: context.market.favoritesFor(user.id) });
+                    }
+
+                    if (method === 'GET') {
+                        return sendJson(response, 200, {
+                            user,
+                            usage: context.billing?.summary(user.id) ?? null,
+                            credits: credits?.summary(user.id) ?? null,
+                        });
+                    }
                 }
 
                 // ------------------------------------------------------ admin
@@ -407,12 +515,148 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                         const updated = (context.auth as AuthService).setStatus(targetId, status);
                         return sendJson(response, 200, { user: updated });
                     }
+
+                    // Manual top-up. Grants only: a negative adjustment would be a
+                    // silent clawback, and the ledger is append-only on purpose.
+                    if (method === 'POST' && targetId !== undefined && parts[4] === 'credits') {
+                        if (context.credits === null) {
+                            return sendJson(response, 400, { error: 'credits_disabled' });
+                        }
+
+                        const body = JSON.parse((await readBody(request)).toString('utf8') || '{}') as {
+                            amount?: number;
+                            reference?: string;
+                        };
+                        const amount = Math.trunc(Number(body.amount ?? 0));
+                        if (!Number.isFinite(amount) || amount <= 0) {
+                            return sendJson(response, 400, { error: 'amount must be a positive integer' });
+                        }
+
+                        const result = context.credits.grant(
+                            targetId,
+                            amount,
+                            'admin',
+                            body.reference === undefined ? undefined : String(body.reference),
+                            { by: user.id },
+                        );
+
+                        return sendJson(response, 200, { userId: targetId, ...result });
+                    }
                 }
 
                 const resource = parts[2];
-                const id = parts[3] ? decodeURIComponent(parts[3]) : undefined;
-                const sub = parts[4];
-                const subId = parts[5] ? decodeURIComponent(parts[5]) : undefined;
+                const id = decodeSegment(parts[3]);
+                // Chat and character ids are URL-encoded on the way in (names contain
+                // spaces and CJK), so every segment is decoded before use.
+                const sub = decodeSegment(parts[4]);
+                const subId = decodeSegment(parts[5]);
+
+                // ------------------------------------------------------ market
+
+                if (resource === 'market') {
+                    if (context.market === null) {
+                        return sendJson(response, 400, {
+                            error: 'market_disabled',
+                            message: 'the character market needs accounts, and must be enabled with STORY_MARKET',
+                        });
+                    }
+
+                    const market = context.market;
+                    const ownerId = id;
+                    const characterId = sub;
+
+                    if (method === 'GET' && ownerId === undefined) {
+                        const sortParam = url.searchParams.get('sort') ?? 'hot';
+                        const sort: MarketSort = sortParam === 'new' || sortParam === 'name' ? sortParam : 'hot';
+                        const q = url.searchParams.get('q');
+                        const tag = url.searchParams.get('tag');
+
+                        return sendJson(response, 200, {
+                            characters: market.list({
+                                ...(q !== null ? { q } : {}),
+                                ...(tag !== null ? { tag } : {}),
+                                sort,
+                                limit: Number(url.searchParams.get('limit') ?? 20),
+                                offset: Number(url.searchParams.get('offset') ?? 0),
+                                ...(user !== null ? { requesterId: user.id } : {}),
+                            }),
+                        });
+                    }
+
+                    if (method === 'GET' && ownerId !== undefined && characterId !== undefined && subId === undefined) {
+                        const entry = market.get(ownerId, characterId, user?.id);
+                        if (entry === null) {
+                            return sendJson(response, 404, { error: 'not_published', message: 'no such published character' });
+                        }
+
+                        // Viewing your own listing should not inflate its score. The
+                        // refreshed stats make this view visible in its own response.
+                        if (user === null || user.id !== ownerId) {
+                            market.recordView(ownerId, characterId);
+                            entry.stats = market.statsFor(ownerId, characterId);
+                        }
+
+                        return sendJson(response, 200, { character: entry });
+                    }
+
+                    if (method === 'POST' && ownerId !== undefined && characterId !== undefined && subId === 'favorite') {
+                        if (user === null) {
+                            return sendJson(response, 400, { error: 'auth_disabled', message: 'favorites need an account' });
+                        }
+
+                        const body = JSON.parse((await readBody(request)).toString('utf8') || '{}') as { favorited?: boolean };
+                        const current = market.get(ownerId, characterId, user.id);
+                        if (current === null) {
+                            return sendJson(response, 404, { error: 'not_published', message: 'no such published character' });
+                        }
+
+                        const favorited = typeof body.favorited === 'boolean' ? body.favorited : !current.favorited;
+                        return sendJson(response, 200, market.setFavorite(user.id, ownerId, characterId, favorited));
+                    }
+
+                    // Import copies the card into the caller's own library. The card's
+                    // embedded world book travels with the PNG, so the copy works
+                    // without reaching back into the publisher's files.
+                    if (method === 'POST' && ownerId !== undefined && characterId !== undefined && subId === 'import') {
+                        if (user === null) {
+                            return sendJson(response, 400, { error: 'auth_disabled', message: 'importing needs an account' });
+                        }
+
+                        if (user.id === ownerId) {
+                            return sendJson(response, 400, { error: 'own_character', message: 'this character is already in your library' });
+                        }
+
+                        const entry = market.get(ownerId, characterId, user.id);
+                        if (entry === null) {
+                            return sendJson(response, 404, { error: 'not_published', message: 'no such published character' });
+                        }
+
+                        const source = await context.libraryFor(ownerId);
+                        const png = await source.readCardPng(characterId);
+                        const imported = await library.importCard(png, { filename: `${characterId}.png` });
+                        market.recordImport(ownerId, characterId);
+
+                        // Report the count including this import.
+                        entry.stats = market.statsFor(ownerId, characterId);
+                        return sendJson(response, 201, { imported, source: entry });
+                    }
+                }
+
+                if (resource === 'rankings' && method === 'GET') {
+                    if (context.market === null) {
+                        return sendJson(response, 400, { error: 'market_disabled' });
+                    }
+
+                    const windowParam = url.searchParams.get('window') ?? 'day';
+                    const window: RankingWindow = ['day', 'week', 'month', 'all'].includes(windowParam)
+                        ? windowParam as RankingWindow
+                        : 'day';
+
+                    return sendJson(response, 200, {
+                        window,
+                        characters: context.market.rankings(window, Number(url.searchParams.get('limit') ?? 20)),
+                    });
+                }
 
                 if (resource === 'characters') {
                     if (method === 'GET' && id === undefined) {
@@ -440,6 +684,42 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
 
                     if (method === 'GET' && id !== undefined && sub === 'card.json') {
                         return sendJson(response, 200, await library.getCard(id));
+                    }
+
+                    // Publishing snapshots the card into the market listing, so
+                    // browsing never reads every user's directory.
+                    if (id !== undefined && sub === 'publish') {
+                        if (context.market === null || user === null) {
+                            return sendJson(response, 400, {
+                                error: 'market_disabled',
+                                message: 'publishing needs accounts, and must be enabled with STORY_MARKET',
+                            });
+                        }
+
+                        if (method === 'GET') {
+                            const published = context.market.isPublic(user.id, id);
+                            return sendJson(response, 200, {
+                                published,
+                                character: published ? context.market.get(user.id, id, user.id) : null,
+                            });
+                        }
+
+                        if (method === 'POST') {
+                            const card = await library.getCard(id);
+                            const character = context.market.publish(user.id, id, {
+                                name: card.data.name,
+                                tags: Array.isArray(card.data.tags) ? card.data.tags : [],
+                                descriptionLength: (card.data.description ?? '').length,
+                            });
+                            return sendJson(response, 201, { published: true, character });
+                        }
+
+                        if (method === 'DELETE') {
+                            return sendJson(response, 200, {
+                                published: false,
+                                removed: context.market.unpublish(user.id, id),
+                            });
+                        }
                     }
                 }
 
@@ -492,8 +772,11 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                         return sendJson(response, 200, { character: id, chats: await library.listChats(id) });
                     }
 
-                    if (method === 'GET' && id !== undefined && subId !== undefined && subId !== 'messages' && subId !== 'regenerate') {
-                        return sendJson(response, 200, { character: id, name: subId, chat: await library.getChat(id, subId) });
+                    // Read one chat: `/chats/<card>/<chat>`. The name lives in `sub`;
+                    // `subId` is only used by the sub-routes (messages, regenerate,
+                    // summarize), so requiring it here made this route unreachable.
+                    if (method === 'GET' && id !== undefined && sub !== undefined && subId === undefined) {
+                        return sendJson(response, 200, { character: id, name: sub, chat: await library.getChat(id, sub) });
                     }
 
                     // Force a summarization pass (same billing path as the automatic one).
@@ -556,6 +839,20 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                             memory: context.config.memory,
                         });
 
+                        // Credits are the user-facing balance; the token quota below is
+                        // the operational ceiling. Checked before anything is spent, so
+                        // an empty account is refused without calling the model.
+                        if (user !== null && context.credits !== null) {
+                            const balance = context.credits.balance(user.id);
+                            if (balance <= 0) {
+                                return sendJson(response, 402, {
+                                    error: 'insufficient_credits',
+                                    message: 'no credits left: check in, redeem an invite, or ask an admin for a grant',
+                                    balance,
+                                });
+                            }
+                        }
+
                         // Quota is checked before the model is called, and the worst
                         // case is reserved so parallel requests cannot overspend.
                         let reservation: Reservation | null = null;
@@ -585,22 +882,54 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                             ...(body.message !== undefined ? { userMessageOverride: body.message } : {}),
                         };
 
-                        const settle = (result: Awaited<ReturnType<ChatSession['send']>>): void => {
-                            if (reservation === null || context.billing === null) {
+                        /**
+                         * Charge the user-facing balance for work that already happened.
+                         *
+                         * The cost is only known after the model replies, so this cannot
+                         * be a precondition. A failure here is logged and swallowed: the
+                         * reply already reached the user, and the token quota is the
+                         * ceiling that actually protects the operator. The idempotency
+                         * key is the request id, so a retry is never charged twice.
+                         */
+                        const chargeCredits = (reference: string, model: string, promptTokens: number, completionTokens: number): void => {
+                            if (user === null || context.credits === null) {
                                 return;
                             }
 
-                            // Idempotent by request id: a retried request is never
-                            // billed twice.
-                            context.billing.settle(reservation, {
-                                requestId: result.requestId,
-                                chatId: `${session.cardId}/${session.name}`,
-                                model: result.model,
-                                promptTokens: result.usage.promptTokens ?? 0,
-                                completionTokens: result.usage.completionTokens ?? 0,
-                                usageSource: result.usageSource,
-                                streamed: result.streamed,
-                            });
+                            const totalTokens = promptTokens + completionTokens;
+                            const cost = context.credits.costForTokens(totalTokens);
+                            if (cost <= 0) {
+                                return;
+                            }
+
+                            try {
+                                context.credits.spend(user.id, cost, 'turn', reference, { model, tokens: totalTokens });
+                            } catch (error) {
+                                console.warn(`[credits] charge failed for ${reference}: ${error instanceof Error ? error.message : String(error)}`);
+                            }
+                        };
+
+                        const settle = (result: Awaited<ReturnType<ChatSession['send']>>): void => {
+                            if (reservation !== null && context.billing !== null) {
+                                // Idempotent by request id: a retried request is never
+                                // billed twice.
+                                context.billing.settle(reservation, {
+                                    requestId: result.requestId,
+                                    chatId: `${session.cardId}/${session.name}`,
+                                    model: result.model,
+                                    promptTokens: result.usage.promptTokens ?? 0,
+                                    completionTokens: result.usage.completionTokens ?? 0,
+                                    usageSource: result.usageSource,
+                                    streamed: result.streamed,
+                                });
+                            }
+
+                            chargeCredits(
+                                result.requestId,
+                                result.model,
+                                result.usage.promptTokens ?? 0,
+                                result.usage.completionTokens ?? 0,
+                            );
                         };
 
                         /**
@@ -650,6 +979,12 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                                 }
 
                                 if (summary !== null) {
+                                    chargeCredits(
+                                        summaryRequestId,
+                                        summary.model,
+                                        summary.usage.promptTokens ?? 0,
+                                        summary.usage.completionTokens ?? 0,
+                                    );
                                     console.log(`[memory] summarized ${session.cardId}/${session.name} up to ${summary.upTo} (pass ${summary.passes})`);
                                     return { summarized: true, upTo: summary.upTo, passes: summary.passes };
                                 }
@@ -759,6 +1094,18 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                 }
 
                 if (error instanceof AuthError) {
+                    return sendJson(response, error.status, { error: error.code, message: error.message });
+                }
+
+                if (error instanceof CreditError) {
+                    return sendJson(response, error.status, {
+                        error: error.code,
+                        message: error.message,
+                        ...error.details,
+                    });
+                }
+
+                if (error instanceof MarketError) {
                     return sendJson(response, error.status, { error: error.code, message: error.message });
                 }
 

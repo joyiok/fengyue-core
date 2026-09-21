@@ -63,6 +63,9 @@ async function withServer(
         config,
         auth,
         billing,
+        // This suite is about quotas; credits and the market have their own.
+        credits: null,
+        market: null,
         libraryFor: (userId: string) => {
             const root = path.join(config.dataRoot, 'users', userId);
             const existing = libraries.get(root) ?? new Library(root);

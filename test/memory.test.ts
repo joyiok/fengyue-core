@@ -348,6 +348,9 @@ async function withServer(run: (harness: Harness) => Promise<void>, handler: Moc
         config,
         auth,
         billing,
+        // Memory is the subject here; credits and the market are tested separately.
+        credits: null,
+        market: null,
         libraryFor: (userId) => {
             const root = path.join(config.dataRoot, 'users', userId);
             const existing = libraries.get(root) ?? new Library(root);

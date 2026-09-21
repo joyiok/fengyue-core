@@ -13,6 +13,23 @@ export interface QuotaPolicy {
     maxTokensPerRequest: number;
 }
 
+/**
+ * Credits: the balance a user spends. The token quota above is an operational
+ * ceiling; this is the currency.
+ */
+export interface CreditSettings {
+    /** Granted once, when an account is created. */
+    initialGrant: number;
+    /** Granted once per UTC day by checking in. */
+    checkinAmount: number;
+    /** Paid to the inviter when their code is redeemed. */
+    inviteReward: number;
+    /** Paid to the person redeeming a code. */
+    inviteeReward: number;
+    /** How many tokens one credit buys. */
+    tokensPerCredit: number;
+}
+
 export interface MemorySettings {
     enabled: boolean;
     /** Un-summarized messages needed before a pass runs. */
@@ -41,6 +58,9 @@ export interface AppConfig {
     allowRegistration: boolean;
     /** Rolling summary memory. */
     memory: MemorySettings;
+    credits: CreditSettings;
+    /** The character market. Off = no publish/browse routes. */
+    marketEnabled: boolean;
 }
 
 function numberFrom(value: string | undefined, fallback: number): number {
@@ -75,5 +95,13 @@ export function loadAppConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
             keepRecent: numberFrom(env.STORY_MEMORY_KEEP_RECENT, 12),
             maxSummaryTokens: numberFrom(env.STORY_MEMORY_MAX_TOKENS, 500),
         },
+        credits: {
+            initialGrant: numberFrom(env.STORY_CREDITS_SIGNUP, 100),
+            checkinAmount: numberFrom(env.STORY_CREDITS_CHECKIN, 10),
+            inviteReward: numberFrom(env.STORY_CREDITS_INVITE, 50),
+            inviteeReward: numberFrom(env.STORY_CREDITS_INVITEE, 50),
+            tokensPerCredit: Math.max(1, numberFrom(env.STORY_TOKENS_PER_CREDIT, 1000)),
+        },
+        marketEnabled: !['off', 'false', '0', 'no'].includes((env.STORY_MARKET ?? 'on').trim().toLowerCase()),
     };
 }

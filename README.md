@@ -8,6 +8,7 @@
 - **M3 世界书生效**：关键词匹配、次关键词逻辑、概率、位置/深度/顺序插入、递归扫描、sticky/cooldown
 - **M4 多用户与额度**：账号与会话、按用户隔离的数据、额度预留与不可变用量流水、全局熔断
 - **M5 滚动摘要记忆**：旧对话压成一段滚动摘要，长对话不再丢掉开头
+- **M6 积分与市场**：余额账本（签到/邀请/管理员加积分）、角色发布与搜索、按天聚合的榜单
 
 ## 为什么先做这一层
 
@@ -123,7 +124,7 @@ $ node src/cli.ts preview default_Seraphina "What is Eldoria?"
 
 **两条规矩**，写在 `src/billing/service.ts` 顶部也写在测试里：
 
-1. **用量是不可变流水**。每次模型调用追加一行 `usage_ledger`，额度和余额都由它 `SUM` 出来，绝不维护一个可能漂移的可变计数器。
+1. **用量是不可变流水**。每次模型调用追加一行 `usage_ledger`，额度与用量都由它 `SUM` 出来，绝不维护一个可能漂移的可变计数器（M6 的积分账本 `credit_ledger` 是同一套做法）。
 2. **请求先预留、再调用**。检查完额度就发请求，会让十个并发请求一起通过检查然后一起超支；预留按最坏情况（提示词估算 + 请求的 `max_tokens`）算，才让限额真正成立。结算时用真实用量替换预留。
 
 **认证**：账号用 scrypt 哈希，且**哈希串自带参数**（`scrypt$N$r$p$hash`），所以以后提高成本不会让老密码全部失效。会话是**不透明随机 token**（只存 SHA-256），不用 JWT——登出必须真的吊销，而且没有签名密钥要轮换。Bearer 头与会话 cookie 都支持。**第一个注册的账号自动成为管理员**（否则你没有任何途径拿到 admin），之后可用 `STORY_ALLOW_REGISTRATION=off` 关闭注册。
@@ -143,6 +144,13 @@ node src/cli.ts user add owner owner-password      # 第一个自动是 admin
 node src/cli.ts user list                          # 带用量
 node src/cli.ts user quota guest --daily 5000 --per-request 256
 node src/cli.ts user disable guest
+
+node src/cli.ts credits show owner                 # 余额 + 总额 + 最近流水（对账用）
+node src/cli.ts credits grant owner 500 --reference goodwill
+node src/cli.ts credits invite owner --count 3
+node src/cli.ts market list --sort hot --limit 10
+node src/cli.ts market publish owner linzhao --root ./data/users/<user-id>
+node src/cli.ts market unpublish owner linzhao
 ```
 
 ### M5 — 滚动摘要记忆
@@ -172,11 +180,54 @@ M1 的窗口只保留最近若干条；M5 补上被挤出去的那部分。做�
 
 **明确未做**：向量召回（排在摘要之后——先做向量会花两周调 embedding 而用户感觉不到差别）、摘要的人工编辑、按角色卡定制摘要提示词。
 
+### M6 — 积分与市场
+
+先分清两套账，它们回答的是不同的问题：
+
+| | 额度（M4） | 积分（M6） |
+|---|---|---|
+| 回答 | 「这个账号一天最多烧多少 token」 | 「这个账号还剩多少钱」 |
+| 目的 | 保护运营者的账单 | 用户自己的余额 |
+| 拒绝 | 402，日/月/全局/并发四种 | 402 `insufficient_credits` |
+
+两者都是**只追加的流水**，余额一律 `SUM(amount)` 算出来，没有可漂移的余额字段。
+积分规则：
+
+| 项 | 默认 | 说明 |
+|---|---|---|
+| 注册赠送 | 100 | 第一个会话不用先签到 |
+| 每日签到 | 10 | 每个 UTC 日一次；reference 就是日期，重复调用只发一次 |
+| 邀请 | 邀请人 50 / 被邀请人 50 | 一个码只能兑换一次，自己的码不能兑换 |
+| 计价 | 1000 tokens = 1 credit，向上取整 | 按一次真实调用的实际 tokens 结算 |
+| 幂等 | `(user_id, reason, reference)` 唯一 | 重试同一 `requestId` 不会重复扣 |
+
+关键取舍：
+
+- **一轮对话结束后**按实际 tokens 扣积分——成本只有模型回复后才知道，所以扣费不可能是前置条件；请求前只查余额，为 0 直接 402，**模型根本不会被调用**；
+- 摘要也一样扣（账本里是 `…:summary:<upTo>`），否则额度上就多一个洞；
+- 扣费失败只写日志：回复已经给到用户了，真正的硬上限是 token 额度，不是积分；
+- 失败/中断的轮次不计费（与 M4 一致）。
+
+市场：
+
+| 规则 | 说明 |
+|---|---|
+| 发布是显式的 | `POST /characters/:id/publish`；默认私有，按 id 猜也拿不到 |
+| 列表读快照 | 发布时把 name/tags/描述长度快照进 `character_shares`，所以浏览列表**不读任何人的目录**——这是市场页能快的前提 |
+| 重发不重置时间 | 重新发布刷新快照，但保留首次 `published_at`，否则改一次就跳到「最新」第一 |
+| 榜单按天聚合 | `character_stats` 一行/角色/天，day/week/month/all 都是范围扫描，不是扫事件表；score = 收藏×3 + 导入×2 + 浏览×1 |
+| 不刷分 | 浏览/导入未发布的角色不计入统计；看自己的发布不算浏览 |
+| 导入是复制 | 把对方的卡 PNG 复制进自己的库（卡里内嵌的世界书随卡一起走），原主人那份不动 |
+
+`STORY_MARKET=off` 可以关掉市场而保留账号与积分；两者都只在多用户模式（`STORY_AUTH=on`）下存在——没有账号的话，「余额」和「谁的公开角色」都没有意义。
+
+**明确未做**：审核/举报流程、真实支付、讨论区（§8 里 M6 只要求「可公开、可搜索；积分流水可对账」）。
+
 ## 用法
 
 ```bash
 npm install          # 只装 typescript / @types/node，仅用于类型检查
-npm test             # 单元测试（69 项）
+npm test             # 单元测试（203 项，其中 2 项是需要真实酒馆目录的交叉验证，默认跳过）
 npm run typecheck
 
 # 指向酒馆的数据目录直接操作
@@ -218,6 +269,29 @@ curl -s -X POST localhost:8787/api/v1/chats/linzhao/2026-09-21_22-09-41/messages
 
 返回里带 `prompt` 统计（包含哪些段落、历史纳入/丢弃多少条、估算 tokens），前端可以直接把它显示成调试信息。
 
+多用户模式下和积分/市场相关的接口：
+
+```
+GET    /api/v1/me/credits                      余额、今日收支、最近流水
+POST   /api/v1/me/checkin                      每日签到（幂等）
+GET    /api/v1/me/invites                      我发出的邀请码
+POST   /api/v1/me/invites                      生成邀请码 {"count":1}
+POST   /api/v1/me/invites/redeem               兑换 {"code":"..."}
+GET    /api/v1/me/favorites                    我收藏的角色
+POST   /api/v1/users/:id/credits               管理员加积分 {"amount":N,"reference":"..."}
+
+GET    /api/v1/market?q=&tag=&sort=hot|new|name&limit=&offset=
+GET    /api/v1/market/:ownerId/:characterId    详情（非本人浏览会计一次浏览）
+POST   /api/v1/market/:ownerId/:characterId/favorite   {"favorited":true|false}
+POST   /api/v1/market/:ownerId/:characterId/import     复制进自己的库
+GET    /api/v1/rankings?window=day|week|month|all&limit=
+
+GET    /api/v1/characters/:id/publish          发布状态
+POST   /api/v1/characters/:id/publish          发布/刷新快照
+DELETE /api/v1/characters/:id/publish          下架
+GET    /api/v1/chats/:cardId/:chatName         读一份会话（名字里的空格与中文要 URL 编码）
+```
+
 ## 验收标准
 
 > **M0**：能把酒馆的 `characters/*.png`、`worlds/*.json` 原样导入并列出；**导出的卡能被酒馆读回**。
@@ -231,6 +305,8 @@ curl -s -X POST localhost:8787/api/v1/chats/linzhao/2026-09-21_22-09-41/messages
 > **M4**：两个账号的数据互不可见；额度耗尽后请求被拒；用量可查。
 >
 > **M5**：长对话（100+ 轮）不丢早期关键信息。
+>
+> **M6**：角色可公开、可搜索；积分流水可对账。
 
 M0 两个方向都有可执行验证：
 
@@ -265,7 +341,9 @@ M2 的三条不变量在 `test/streaming.test.ts`、`test/session-m2.test.ts`、
 
 M5 在 `test/memory.test.ts` 里覆盖：阈值与水位线的纯函数行为、注入位置与被覆盖消息不再重复发送、会话集成（摘要落盘后重载仍在）、以及「摘要调用单独记账」与「摘要失败不影响轮次」。
 
-M4 在三个层面覆盖：`test/auth.test.ts`（哈希自带参数、token 只存哈希、过期与吊销、首个账号是管理员）、`test/billing.test.ts`（预留计入限额、日/月/全局/并发四种拒绝、幂等计费、零额度=不限）、`test/server-m4.test.ts`（未带 token 401、两账号隔离到文件系统、流式计费一次、重发同一 requestId 只调一次模型、管理员路由与限额设置）。实测量级：169 项测试。
+M6 在 `test/m6.test.ts` 里覆盖（18 项）：账本对账（`granted - spent == balance`，且流水逐条加起来等于余额）、同一 reference 不重复扣、UTC 日签到的边界（跨天前后各一次）、邀请双边各只发一次（含用自己的码、重复兑换、不存在的码）、发布快照与「重发不重置发布时间」、未发布角色按 id 也拿不到、榜单权重与日/周/月/全窗口的边界、标签整词匹配（`cat` 不匹配 `category`）、收藏幂等、跨账号导入是复制而非移动、余额为 0 时 **mock 一次都没被调用**、市场关闭不影响积分、以及中文/空格会话名走 URL 的编码链路。
+
+M4 在三个层面覆盖：`test/auth.test.ts`（哈希自带参数、token 只存哈希、过期与吊销、首个账号是管理员）、`test/billing.test.ts`（预留计入限额、日/月/全局/并发四种拒绝、幂等计费、零额度=不限）、`test/server-m4.test.ts`（未带 token 401、两账号隔离到文件系统、流式计费一次、重发同一 requestId 只调一次模型、管理员路由与限额设置）。实测量级：203 项测试。
 
 M3 的世界书行为在 `test/worldinfo.test.ts` 与 `test/session-m3.test.ts` 里逐条覆盖：匹配（大小写/整词/正则/扫描深度）、四种次关键词逻辑、`constant`、`disable`、`delay`、`probability`（注入随机源）、`sticky`+`cooldown` 窗口、预算按 `order` 取舍、三种递归开关、六种插入位置与 `atDepth` 的深度、以及跨本状态不串号。真实数据的验证命令就是上面那条 `preview`。
 
@@ -293,6 +371,8 @@ src/
   db/             SQLite 打开/迁移/事务
   auth/           密码哈希（scrypt）、账号与会话
   billing/        额度策略、预留、不可变用量流水
+  credits/        积分账本：签到、邀请、计价
+  market/         发布快照、搜索、收藏、按天聚合的榜单
   gateway/        OpenAI 兼容适配器 + 配置
   chat/           会话：建会话、发一轮、流式、重新生成、落盘
   config.ts       环境变量驱动的配置
@@ -303,11 +383,15 @@ test/             单元测试 + 交叉验证（交叉验证需环境变量，�
 scripts/          与酒馆的互操作验收脚本
 ```
 
-## 下一步（M5 / M6）
+## 下一步
 
-**M5 — 摘要记忆**：滑动窗口已经有了（M1 的裁剪逻辑），M5 加滚动摘要；向量召回排在摘要之后，因为先做向量会花两周调 embedding 而用户感觉不到差别。
+M0–M6 都已完成。按 `docs/product-backend-plan.md` §8，接下来不是再加功能，而是把它推到能被真实用户使用的位置：
 
-**M6 — 平台功能**：UGC 市场、榜单（增量聚合表）、积分与邀请、论坛、App（复用同一套 API）。
+- **前端**：`docs/product-backend-plan.md` 建议 Next.js（SSR + 流式渲染）。现在这套接口是为了让前端能直接渲染调试信息而设计的（`prompt` 统计、`memory` 水位、积分流水都随响应返回）。
+- **规模**：预留表在内存里（多实例要挪到 Redis）；SQLite 换 Postgres 只需替换 `src/db/database.ts`；榜单已经是按天聚合的，日均增长与角色数同阶而不是与浏览量同阶。
+- **合规**：商业化 + NSFW 涉及支付与内容合规，技术方案之外，自行评估。
+
+**M6 明确未做**：审核/举报、真实支付、讨论区。
 
 ## 说明
 
@@ -315,6 +399,7 @@ scripts/          与酒馆的互操作验收脚本
 - 依赖策略：运行时零依赖。PNG 用内置 `zlib`，HTTP 用内置 `node:http`，测试用内置 `node:test`
 - token 数是**估算**（CJK 约 1 token/字，ASCII 约 4 字符/token）。精确计数需要目标模型自己的分词器，M3 之后再按需接入
 - 单用户模式（`STORY_AUTH=off`，默认 `./data`）没有鉴权，只应监听回环；开启账号后每个数据接口都要求 Bearer token 或会话 cookie
-- 账号相关的环境变量：`STORY_AUTH`、`STORY_DB`、`STORY_DATA_ROOT`、`STORY_ALLOW_REGISTRATION`、`STORY_DAILY_TOKENS`、`STORY_MONTHLY_TOKENS`、`STORY_MAX_TOKENS_PER_REQUEST`、`STORY_GLOBAL_DAILY_TOKENS`、`STORY_MAX_STREAMS`、`STORY_SESSION_TTL_DAYS`
+- 账号相关的环境变量：`STORY_AUTH`、`STORY_DB`、`STORY_DATA_ROOT`、`STORY_ALLOW_REGISTRATION`、`STORY_DAILY_TOKENS`、`STORY_MONTHLY_TOKENS`、`STORY_MAX_TOKENS_PER_REQUEST`、`STORY_GLOBAL_DAILY_TOKENS`、`STORY_MAX_STREAMS`、`STORY_SESSION_TTL_DAYS`、`STORY_MEMORY*`
+- 积分与市场的环境变量：`STORY_CREDITS_SIGNUP`（注册赠送，默认 100）、`STORY_CREDITS_CHECKIN`（签到，10）、`STORY_CREDITS_INVITE` / `STORY_CREDITS_INVITEE`（邀请双边，各 50）、`STORY_TOKENS_PER_CREDIT`（默认 1000）、`STORY_MARKET`（`off` 关掉市场）
 - `node:sqlite` 是实验特性，换 Postgres 时只需替换 `src/db/database.ts`；预留表在内存里，多实例要挪到 Redis
 - 直接对酒馆的数据目录写入前请先备份（读是安全的）

@@ -25,11 +25,13 @@ import { AuthService } from './auth/service.ts';
 import { BillingService } from './billing/service.ts';
 import { ChatSession } from './chat/session.ts';
 import { loadAppConfig } from './config.ts';
+import { CreditService } from './credits/service.ts';
 import { Database } from './db/database.ts';
 import type { ChatMessage } from './chats/types.ts';
 import { loadModelConfig } from './gateway/config.ts';
 import { describeModelConfig } from './gateway/types.ts';
 import { Library } from './library.ts';
+import { MarketService } from './market/service.ts';
 import { assemblePrompt } from './prompt/assemble.ts';
 
 function usage(): never {
@@ -54,6 +56,13 @@ Commands:
   user enable|disable <handle>             flip an account's status
   user quota <handle> [--daily N] [--monthly N] [--per-request N]
 
+  credits show <handle>                    balance, totals and the recent ledger
+  credits grant <handle> <amount> [--reference X]   manual top-up
+  credits invite <handle> [--count N]      mint invite codes
+  market list [--q TEXT] [--sort hot|new|name] [--limit N]
+  market publish <handle> <cardId> [--root DIR]     publish a card
+  market unpublish <handle> <cardId>       withdraw a published card
+
 Options:
   --root <dir>                  library root (default: $STORY_LIBRARY_ROOT or ./library)
   --persona <name>              name used for {{user}} (default: $STORY_PERSONA_NAME or User)
@@ -62,6 +71,20 @@ Options:
   --db <path>                   account database (default: $STORY_DB or ./story.sqlite)
 `);
     process.exit(2);
+}
+
+/**
+ * Split `<command> <positional...> [--flag value]` into its parts, so a command
+ * can read positionals without tripping over a flag's value.
+ */
+function splitArgs(args: string[]): { positional: string[]; option: (name: string) => string | undefined } {
+    return {
+        positional: args.filter((value, index) => !value.startsWith('--') && !(args[index - 1] ?? '').startsWith('--')),
+        option: (name) => {
+            const index = args.indexOf(name);
+            return index >= 0 ? args[index + 1] : undefined;
+        },
+    };
 }
 
 function takeRoot(argv: string[]): {
@@ -475,6 +498,150 @@ async function main(): Promise<number> {
                         });
 
                         console.log(JSON.stringify(policy));
+                        return 0;
+                    }
+
+                    default:
+                        usage();
+                }
+            } finally {
+                db.close();
+            }
+        }
+
+        case 'credits': {
+            const config = loadAppConfig();
+            const db = new Database(dbPath);
+            const auth = new AuthService(db, { sessionTtlDays: config.sessionTtlDays });
+            const credits = new CreditService(db, {
+                initialGrant: config.credits.initialGrant,
+                checkinAmount: config.credits.checkinAmount,
+                inviteReward: config.credits.inviteReward,
+                inviteeReward: config.credits.inviteeReward,
+                tokensPerCredit: config.credits.tokensPerCredit,
+            });
+
+            try {
+                const { positional, option } = splitArgs(args);
+                const [action, handleArg, amountArg] = positional;
+
+                if (!action || !handleArg) usage();
+                const user = auth.findByHandle(handleArg);
+                if (user === null) {
+                    throw new Error(`no such account: ${handleArg}`);
+                }
+
+                switch (action) {
+                    case 'show': {
+                        const summary = credits.summary(user.id, 20);
+
+                        // granted - spent == balance is the reconciliation an operator
+                        // actually checks, so print both sides.
+                        console.log(`${user.handle}  balance=${summary.balance}  granted=${summary.granted}  spent=${summary.spent}  `
+                            + `today=+${summary.today.granted}/-${summary.today.spent}  (${credits.tokensPerCredit} tokens = 1 credit)`);
+
+                        for (const entry of summary.recent) {
+                            console.log([
+                                entry.createdAt,
+                                String(entry.amount).padStart(6),
+                                entry.reason.padEnd(8),
+                                entry.reference ?? '',
+                            ].join('  '));
+                        }
+                        return 0;
+                    }
+
+                    case 'grant': {
+                        const amount = Math.trunc(Number(amountArg));
+                        if (!Number.isFinite(amount) || amount <= 0) {
+                            throw new Error('grant needs a positive amount: credits grant <handle> <amount> [--reference X]');
+                        }
+
+                        const result = credits.grant(user.id, amount, 'admin', option('--reference'));
+                        console.log(`${result.recorded ? 'granted' : 'already granted (same reference)'} `
+                            + `${amount} to ${user.handle}; balance=${result.balance}`);
+                        return 0;
+                    }
+
+                    case 'invite': {
+                        const count = Math.trunc(Number(option('--count') ?? 1));
+                        const codes = credits.createInvite(user.id, Number.isFinite(count) && count > 0 ? count : 1);
+                        for (const code of codes) {
+                            console.log(code);
+                        }
+                        return 0;
+                    }
+
+                    default:
+                        usage();
+                }
+            } finally {
+                db.close();
+            }
+        }
+
+        case 'market': {
+            const config = loadAppConfig();
+            const db = new Database(dbPath);
+            const auth = new AuthService(db, { sessionTtlDays: config.sessionTtlDays });
+            const market = new MarketService(db);
+
+            try {
+                const { positional, option } = splitArgs(args);
+                const [action, handleArg, cardId] = positional;
+
+                switch (action) {
+                    case 'list': {
+                        const sortArg = option('--sort');
+                        const q = option('--q');
+                        const list = market.list({
+                            ...(q !== undefined ? { q } : {}),
+                            sort: sortArg === 'new' || sortArg === 'name' ? sortArg : 'hot',
+                            limit: Number(option('--limit') ?? 20),
+                            offset: Number(option('--offset') ?? 0),
+                        });
+
+                        if (list.length === 0) {
+                            console.log('nothing published yet');
+                            return 0;
+                        }
+
+                        for (const entry of list) {
+                            console.log([
+                                entry.ownerId.slice(0, 8),
+                                entry.characterId.padEnd(18),
+                                `score=${String(entry.stats.score).padStart(4)}`,
+                                `fav=${entry.stats.favorites} import=${entry.stats.imports} view=${entry.stats.views}`,
+                                entry.tags.join(','),
+                            ].join('  '));
+                        }
+                        return 0;
+                    }
+
+                    case 'publish':
+                    case 'unpublish': {
+                        if (!handleArg || !cardId) usage();
+                        const user = auth.findByHandle(handleArg);
+                        if (user === null) {
+                            throw new Error(`no such account: ${handleArg}`);
+                        }
+
+                        if (action === 'unpublish') {
+                            const removed = market.unpublish(user.id, cardId);
+                            console.log(removed ? `unpublished ${cardId}` : `${cardId} was not published`);
+                            return 0;
+                        }
+
+                        // --root is that account's library directory, since cards live
+                        // in files rather than in the database.
+                        const card = await new Library(root).getCard(cardId);
+                        const entry = market.publish(user.id, cardId, {
+                            name: card.data.name,
+                            tags: Array.isArray(card.data.tags) ? card.data.tags : [],
+                            descriptionLength: (card.data.description ?? '').length,
+                        });
+
+                        console.log(`published ${entry.characterId} for ${user.handle}: ${entry.name} [${entry.tags.join(', ')}]`);
                         return 0;
                     }
 

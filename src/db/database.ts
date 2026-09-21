@@ -79,6 +79,73 @@ const MIGRATIONS: Migration[] = [
             )`,
         ],
     },
+    {
+        version: 2,
+        statements: [
+            // User-facing currency. Separate from the token quota: the quota is an
+            // operational ceiling, credits are the balance a user actually spends.
+            `CREATE TABLE IF NOT EXISTS credit_ledger (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                amount     INTEGER NOT NULL,
+                reason     TEXT NOT NULL,
+                reference  TEXT,
+                metadata   TEXT,
+                day        TEXT NOT NULL,
+                month      TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )`,
+            // Idempotency: a check-in, an invite redemption or a turn can only be
+            // charged or granted once.
+            `CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_reference
+                ON credit_ledger(user_id, reason, reference) WHERE reference IS NOT NULL`,
+            `CREATE INDEX IF NOT EXISTS idx_credit_user ON credit_ledger(user_id, id)`,
+            // M4 created this keyed by character_id alone, which cannot be unique
+            // across users (two people may both own "linzhao"). Nothing used the
+            // table yet, so it is recreated with the right key plus the snapshot
+            // columns the market lists from.
+            `DROP TABLE IF EXISTS character_shares`,
+            `CREATE TABLE IF NOT EXISTS character_shares (
+                user_id            TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                character_id       TEXT NOT NULL,
+                visibility         TEXT NOT NULL DEFAULT 'private',
+                name               TEXT NOT NULL DEFAULT '',
+                tags               TEXT NOT NULL DEFAULT '',
+                description_length INTEGER NOT NULL DEFAULT 0,
+                published_at       TEXT,
+                updated_at         TEXT NOT NULL,
+                PRIMARY KEY (user_id, character_id)
+            )`,
+            `CREATE INDEX IF NOT EXISTS idx_shares_public ON character_shares(visibility, published_at)`,
+            `CREATE TABLE IF NOT EXISTS invite_codes (
+                code       TEXT PRIMARY KEY,
+                owner_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                created_at TEXT NOT NULL,
+                used_by    TEXT REFERENCES users(id) ON DELETE SET NULL,
+                used_at    TEXT
+            )`,
+            `CREATE INDEX IF NOT EXISTS idx_invite_owner ON invite_codes(owner_id)`,
+            `CREATE TABLE IF NOT EXISTS character_favorites (
+                user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                owner_id     TEXT NOT NULL,
+                character_id TEXT NOT NULL,
+                created_at   TEXT NOT NULL,
+                PRIMARY KEY (user_id, owner_id, character_id)
+            )`,
+            // One row per character per day. Rankings read this instead of scanning
+            // events, which is what keeps a windowed ranking cheap.
+            `CREATE TABLE IF NOT EXISTS character_stats (
+                owner_id     TEXT NOT NULL,
+                character_id TEXT NOT NULL,
+                day          TEXT NOT NULL,
+                favorites    INTEGER NOT NULL DEFAULT 0,
+                imports      INTEGER NOT NULL DEFAULT 0,
+                views        INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (owner_id, character_id, day)
+            )`,
+            `CREATE INDEX IF NOT EXISTS idx_stats_day ON character_stats(day)`,
+        ],
+    },
 ];
 
 export class Database {
