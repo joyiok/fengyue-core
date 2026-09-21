@@ -224,12 +224,32 @@ M1 的窗口只保留最近若干条；M5 补上被挤出去的那部分。做�
 
 **明确未做**：审核/举报流程、真实支付、讨论区（§8 里 M6 只要求「可公开、可搜索；积分流水可对账」）。
 
+### 网页客户端
+
+`web/` 是 Next.js 客户端，也是这套接口的唯一消费者：对话（流式、重新生成、删单条）、
+角色（导入/新建/编辑/换头像/发布）、世界书（逐词条编辑命中与插入）、市场与榜单、
+积分与额度（含管理员面板）。页面清单与已知取舍见 [`web/README.md`](web/README.md)。
+
+三条和后端对应得上的实现约束：
+
+1. **流式不能被缓冲。** 生产里 Caddy 把 `/api/*` 直接反代给本服务（`flush_interval -1`），
+   本地开发走 `web/app/api/v1/[...path]` 那个代理；两者都只转发字节，不改写、不攒。
+   实测逐字到达时间直连与经代理一致（9 帧 / 490ms）。
+2. **一轮没落盘就不算发生。** 后端是原子的，所以界面上那一段在 `done` 之前只活在
+   `pending` 里；失败或按「停止」什么也不留，草稿回输入框——不会出现“页面上有一条、
+   文件里没有”。
+3. **`requestId` 是一次“说这句话”的尝试。** 同一句话重试复用同一个 id，命中日志里的
+   回复就不会再调模型、再扣一次费。
+
 ## 用法
 
 ```bash
 npm install          # 只装 typescript / @types/node，仅用于类型检查
-npm test             # 单元测试（203 项，其中 2 项是需要真实酒馆目录的交叉验证，默认跳过）
+npm test             # 单元测试（215 项，其中 2 项是需要真实酒馆目录的交叉验证，默认跳过）
 npm run typecheck
+
+# 网页客户端（另开一个终端）
+cd web && npm install && npm run dev     # http://localhost:3000，接口默认指向 127.0.0.1:8787
 
 # 指向酒馆的数据目录直接操作
 export STORY_LIBRARY_ROOT=/path/to/sillytavern/data/default-user
@@ -293,7 +313,28 @@ DELETE /api/v1/characters/:id/publish          下架
 GET    /api/v1/chats/:cardId/:chatName         读一份会话（名字里的空格与中文要 URL 编码）
 ```
 
+网页客户端还要用到的那几条（都是同一套读写，只是开了 HTTP 入口）：
+
+```
+PUT    /api/v1/characters/:id                  编辑卡（{"data":{…}} 浅合并进现有字段）
+PUT    /api/v1/characters/:id/avatar           换头像（body 是一张 PNG，卡片字段不动）
+DELETE /api/v1/characters/:id                  删角色，连同打不开的那些会话
+PUT    /api/v1/worldbooks/:id                  写世界书（新建或覆盖）
+DELETE /api/v1/worldbooks/:id                  删世界书
+GET    /api/v1/market/:ownerId/:characterId/card.png    已发布卡的头像
+GET    /api/v1/market/:ownerId/:characterId/card.json   已发布卡的完整内容
+DELETE /api/v1/chats/:cardId/:chatName         删一个会话
+DELETE /api/v1/chats/:cardId/:chatName/messages/:index  删一条消息
+```
+
+`GET /api/v1/chats/:cardId/:chatName` 带 `?offset=&limit=` 可以分页（都不给就是整份，
+响应里的 `total` 始终是全量长度）。改写一条消息不是单独的接口：用 `regenerate` 带
+`message`，被替换的回答会留在 `extra.story.previousReplies` 里。
+```
+
 `GET /` 与 `GET /health` 不需要 token：前者说明这个服务是什么、有哪些接口（还没有账号时会提示先去注册），后者是给探针用的。其余所有数据接口都要 Bearer token 或会话 cookie。
+
+部署里 Caddy 把 `/` 与 `/api/*` 之外的东西给了网页客户端（`web/`），所以接口的这个自述页只在应用端口上直接可见。
 
 ## 部署
 
@@ -362,7 +403,7 @@ M5 在 `test/memory.test.ts` 里覆盖：阈值与水位线的纯函数行为、
 
 M6 在 `test/m6.test.ts` 里覆盖（18 项）：账本对账（`granted - spent == balance`，且流水逐条加起来等于余额）、同一 reference 不重复扣、UTC 日签到的边界（跨天前后各一次）、邀请双边各只发一次（含用自己的码、重复兑换、不存在的码）、发布快照与「重发不重置发布时间」、未发布角色按 id 也拿不到、榜单权重与日/周/月/全窗口的边界、标签整词匹配（`cat` 不匹配 `category`）、收藏幂等、跨账号导入是复制而非移动、余额为 0 时 **mock 一次都没被调用**、市场关闭不影响积分、以及中文/空格会话名走 URL 的编码链路。
 
-M4 在三个层面覆盖：`test/auth.test.ts`（哈希自带参数、token 只存哈希、过期与吊销、首个账号是管理员）、`test/billing.test.ts`（预留计入限额、日/月/全局/并发四种拒绝、幂等计费、零额度=不限）、`test/server-m4.test.ts`（未带 token 401、两账号隔离到文件系统、流式计费一次、重发同一 requestId 只调一次模型、管理员路由与限额设置）。实测量级：203 项测试。
+M4 在三个层面覆盖：`test/auth.test.ts`（哈希自带参数、token 只存哈希、过期与吊销、首个账号是管理员）、`test/billing.test.ts`（预留计入限额、日/月/全局/并发四种拒绝、幂等计费、零额度=不限）、`test/server-m4.test.ts`（未带 token 401、两账号隔离到文件系统、流式计费一次、重发同一 requestId 只调一次模型、管理员路由与限额设置）。网页客户端要用的编辑/删除接口在 `test/server-editing.test.ts`（卡片原地编辑不动头像与未改字段、换头像不动字段、删角色连带会话、世界书写/删、删会话、删单条消息且越界是 404、会话分页、已发布卡的头像与完整内容）。实测量级：215 项测试。
 
 M3 的世界书行为在 `test/worldinfo.test.ts` 与 `test/session-m3.test.ts` 里逐条覆盖：匹配（大小写/整词/正则/扫描深度）、四种次关键词逻辑、`constant`、`disable`、`delay`、`probability`（注入随机源）、`sticky`+`cooldown` 窗口、预算按 `order` 取舍、三种递归开关、六种插入位置与 `atDepth` 的深度、以及跨本状态不串号。真实数据的验证命令就是上面那条 `preview`。
 
@@ -398,6 +439,7 @@ src/
   library.ts      套在酒馆数据目录上的文件库
   server.ts       HTTP API（node:http，无框架）
   cli.ts          命令行
+web/              网页客户端（Next.js）：对话、角色、世界书、市场、账户
 deploy/           Docker Compose 部署：Dockerfile、Caddyfile、备份、systemd 单元、自检
 test/             单元测试 + 交叉验证（交叉验证需环境变量，默认跳过）
 scripts/          与酒馆的互操作验收脚本
@@ -405,13 +447,14 @@ scripts/          与酒馆的互操作验收脚本
 
 ## 下一步
 
-M0–M6 都已完成。按 `docs/product-backend-plan.md` §8，接下来不是再加功能，而是把它推到能被真实用户使用的位置：
+M0–M6 与网页客户端都已完成。按 `docs/product-backend-plan.md` §8，接下来不是再加功能，而是把它推到能被真实用户使用的位置：
 
-- **前端**：`docs/product-backend-plan.md` 建议 Next.js（SSR + 流式渲染）。现在这套接口是为了让前端能直接渲染调试信息而设计的（`prompt` 统计、`memory` 水位、积分流水都随响应返回）。
 - **规模**：预留表在内存里（多实例要挪到 Redis）；SQLite 换 Postgres 只需替换 `src/db/database.ts`；榜单已经是按天聚合的，日均增长与角色数同阶而不是与浏览量同阶。
 - **合规**：商业化 + NSFW 涉及支付与内容合规，技术方案之外，自行评估。
 
-**M6 明确未做**：审核/举报、真实支付、讨论区。
+**M6 明确未做**：审核/举报、真实支付、讨论区。**网页客户端明确未做**：世界书的分组评分
+与向量召回（后端也没做）、新建会话时“不挂任何世界书”（接口的 `worldbookIds` 传空会退回
+primary world，没有“一本都不要”这个表达）。
 
 ## 说明
 

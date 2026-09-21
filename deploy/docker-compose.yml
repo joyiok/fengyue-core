@@ -80,6 +80,45 @@ services:
     networks:
       - app
 
+  # The web client. Stateless: it renders the UI and, outside production
+  # routing, forwards /api to story-core. Here Caddy talks to story-core for
+  # /api directly (see the Caddyfile), so this container only ever serves pages.
+  web:
+    build:
+      context: ../web
+      dockerfile: Dockerfile
+    image: "${STORY_WEB_IMAGE:-story-web:local}"
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    # The app writes nothing except Next's own build cache, which is mounted as
+    # a tmpfs below. Everything else stays read-only.
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /app/.next/cache
+    stop_grace_period: 30s
+    environment:
+      TZ: "${TZ:-Asia/Shanghai}"
+      # Used only by the dev-mode proxy route; in this stack Caddy owns /api.
+      STORY_API_BASE: "http://story-core:8787"
+    ports:
+      # Loopback only, for `curl` on the host. Caddy reaches it over the network.
+      - "${WEB_LOCAL_PORT:-127.0.0.1:3000}:3000"
+    depends_on:
+      story-core:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/login').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    logging: *default-logging
+    networks:
+      - app
+
   caddy:
     image: "${CADDY_IMAGE:-caddy:2-alpine}"
     restart: unless-stopped
@@ -97,6 +136,8 @@ services:
     stop_grace_period: 30s
     depends_on:
       story-core:
+        condition: service_healthy
+      web:
         condition: service_healthy
     environment:
       APP_DOMAIN: "${APP_DOMAIN:-:80}"

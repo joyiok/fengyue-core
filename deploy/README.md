@@ -1,7 +1,8 @@
 # 部署 story-core
 
-单机 Docker Compose：一个 `story-core` 容器 + 一个 Caddy（自动 HTTPS）。运行时状态都在
-本目录（`data/`、`caddy/`、`backups/`、`.env`），代码在仓库里，两者分开。
+单机 Docker Compose：一个 `story-core` 容器 + 一个 `web` 容器（网页客户端）+ 一个 Caddy
+（自动 HTTPS）。运行时状态都在本目录（`data/`、`caddy/`、`backups/`、`.env`），代码在
+仓库里，两者分开。
 
 ## 前置
 
@@ -27,12 +28,16 @@ docker compose up -d --build
 ./check.sh
 ```
 
-`docker compose up -d --build` 会在本机构建镜像（没有构建步骤，只是把 `src/` 复制进
-`node:22-alpine`），不需要拉取任何私有镜像。
+`docker compose up -d --build` 会在本机构建两个镜像：`story-core` 只是把 `src/` 复制进
+`node:22-alpine`（运行时零依赖，没有构建步骤），`web` 会跑一次 `next build` 产出
+standalone 包。不需要拉取任何私有镜像。
 
 ## 第一个账号
 
-开启账号后（`STORY_AUTH=on`），**第一个注册的账号自动成为管理员**：
+开启账号后（`STORY_AUTH=on`），**第一个注册的账号自动成为管理员**。直接打开域名，页面
+会把它送到 `/register`。
+
+不想用浏览器也可以：
 
 ```bash
 curl -sS -X POST https://你的域名/api/v1/auth/register \
@@ -40,10 +45,12 @@ curl -sS -X POST https://你的域名/api/v1/auth/register \
   -d '{"handle":"owner","password":"一个足够长的密码"}'
 ```
 
-响应里的 `token` 就是后续所有请求的 `Authorization: Bearer <token>`。注册完可以按需
-把 `STORY_ALLOW_REGISTRATION` 改成 `off`（`docker compose up -d` 生效）。
+响应里的 `token` 是给脚本用的 `Authorization: Bearer <token>`（网页端走服务端下发的会话
+cookie，不需要自己存）。注册完可以按需把 `STORY_ALLOW_REGISTRATION` 改成 `off`
+（`docker compose up -d` 生效）。
 
-没有账号时，`GET /` 会返回这个服务是什么、有哪些接口，以及"下一步该注册"的提示。
+Caddy 把 `/` 给了网页客户端，所以接口那个自述页只在应用端口
+（`http://127.0.0.1:8787/`）上直接可见。
 
 ## 模型网关
 
@@ -113,4 +120,7 @@ docker compose up -d
   干净"的快照，就在备份前停栈：`docker compose down && ./backup.sh && docker compose up -d`。
 - **Caddyfile 里只压缩 JSON**，并且给 `reverse_proxy` 设了 `flush_interval -1`。这两条都是
   为了 SSE：压缩或缓冲 `text/event-stream` 会让逐字输出变成一坨。
-- **应用容器是只读根文件系统**，只有 `data/`、`/tmp` 可写；Caddy 同理，只有 `caddy/`。
+- **路由全部写在一个 `route` 块里**，所以 `/api/*`、`/health`、其余的优先级是写死的。不这样做的话 Caddy 会按指令种类排序，“这两个代理哪个先匹配上”就不再显而易见。
+- **`/api/*` 不经过 web 容器**。生产里网页客户端根本收不到接口请求，它自带的那个
+  代理路由只是 `next dev` 用的。
+- **应用容器是只读根文件系统**，只有 `data/`、`/tmp` 可写；`web` 同理，只多 `/app/.next/cache`（Next 的构建缓存）；Caddy 只有 `caddy/`。

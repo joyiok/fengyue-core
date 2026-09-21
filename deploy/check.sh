@@ -35,6 +35,12 @@ if ! docker compose ps --status running --format '{{.Service}}' 2>/dev/null | gr
 fi
 ok "story-core container is running"
 
+if docker compose ps --status running --format '{{.Service}}' 2>/dev/null | grep -q web; then
+  ok "web container is running"
+else
+  die "the web container is not running"
+fi
+
 if docker compose ps --status running --format '{{.Service}}' 2>/dev/null | grep -q caddy; then
   ok "caddy container is running"
 else
@@ -59,6 +65,20 @@ else
   warn "root route did not return the expected landing payload"
 fi
 
+# ---------------------------------------------------------------- web client
+WEB_LOCAL_PORT_VALUE="$(sed -n 's/^WEB_LOCAL_PORT=//p' .env | tail -1)"
+WEB_LOCAL_PORT_VALUE="${WEB_LOCAL_PORT_VALUE:-127.0.0.1:3000}"
+WEB_PROBE_PORT="${WEB_LOCAL_PORT_VALUE##*:}"
+
+# A page, not an API: the UI owns `/` now. The API's own landing payload is only
+# reachable on the app port above, which is why that check still exists.
+PAGE_CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0.0.1:${WEB_PROBE_PORT}/login" 2>/dev/null || true)"
+if [ "$PAGE_CODE" = "200" ]; then
+  ok "web client answered on 127.0.0.1:${WEB_PROBE_PORT}"
+else
+  die "web client did not serve /login (HTTP ${PAGE_CODE:-000})"
+fi
+
 # ---------------------------------------------------------------- reverse proxy
 case "$APP_DOMAIN_VALUE" in
   :*) URL="http://127.0.0.1${APP_DOMAIN_VALUE}" ;;
@@ -67,10 +87,22 @@ esac
 
 CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 "$URL/" 2>/dev/null || true)"
 CODE="${CODE:-000}"
+# 307 is the normal answer: `/` sends everyone to /chats, and the app frame then
+# sends guests on to /login.
 case "$CODE" in
-  200|301|302|308) ok "reverse proxy answered ($URL -> HTTP $CODE)" ;;
+  200|301|302|307|308) ok "reverse proxy answered ($URL -> HTTP $CODE)" ;;
   000) warn "could not reach $URL from here (DNS or the proxy may still be warming up)" ;;
   *) die "unexpected HTTP $CODE from $URL; inspect: docker compose logs --tail=50 caddy" ;;
 esac
+
+# The API must be routed to story-core and not to the web client — otherwise
+# every page loads and nothing works. `/api/v1/model` answers 200 whether or not
+# a model is configured, so anything that is not JSON here is a routing bug.
+API_BODY="$(curl -sS --max-time 15 "$URL/api/v1/model" 2>/dev/null || true)"
+if printf '%s' "$API_BODY" | grep -Eq '"configured"'; then
+  ok "reverse proxy routes /api to the application"
+else
+  die "the API is not reachable through $URL (got: ${API_BODY:-nothing})"
+fi
 
 echo "all checks passed"
