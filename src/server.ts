@@ -18,13 +18,13 @@ import path from 'node:path';
 import { AuthError, AuthService, type User } from './auth/service.ts';
 import { BillingService, QuotaError, type Reservation } from './billing/service.ts';
 import { ChatSession } from './chat/session.ts';
-import { loadAppConfig, type AppConfig } from './config.ts';
+import { appConfigToValues, loadAppConfig, toModelConfig, type AppConfig } from './config.ts';
 import { CreditError, CreditService } from './credits/service.ts';
 import { Database } from './db/database.ts';
-import { loadModelConfig } from './gateway/config.ts';
 import { ModelError, describeModelConfig, type ModelConfig } from './gateway/types.ts';
 import { Library } from './library.ts';
 import { MarketError, MarketService, type MarketSort, type RankingWindow } from './market/service.ts';
+import { SettingsService } from './settings/service.ts';
 
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const SESSION_COOKIE = 'story_session';
@@ -193,6 +193,13 @@ const PUBLIC_PATHS = new Set([
 ]);
 
 export interface ServerContext {
+    /**
+     * The settings table. Absent when there is no store behind this context — a
+     * single-user library or a hand-built test harness — in which case `config`
+     * is a plain snapshot and the settings routes are disabled.
+     */
+    settings?: SettingsService | null;
+    /** Live over the settings table; a snapshot when there is no table. */
     config: AppConfig;
     /** Null in single-user mode. */
     auth: AuthService | null;
@@ -200,7 +207,7 @@ export interface ServerContext {
     billing: BillingService | null;
     /** Null in single-user mode: a currency needs accounts. */
     credits: CreditService | null;
-    /** Null in single-user mode or when the market is switched off. */
+    /** Null in single-user mode. Gated per request by `config.marketEnabled`. */
     market: MarketService | null;
     libraryFor: (userId: string) => Library | Promise<Library>;
 }
@@ -215,6 +222,7 @@ export interface ServerOptions {
 /** Wrap one library so it behaves as a single-user deployment. */
 export function singleUserContext(library: Library, config: AppConfig = loadAppConfig({ STORY_AUTH: 'off' })): ServerContext {
     return {
+        settings: null,
         config,
         auth: null,
         billing: null,
@@ -225,19 +233,44 @@ export function singleUserContext(library: Library, config: AppConfig = loadAppC
 }
 
 export interface AppContext extends ServerContext {
+    /** A real context always has one; `ServerContext` allows it to be absent. */
+    settings: SettingsService;
     db: Database;
     close: () => void;
 }
 
-/** Build the real thing: database, accounts, billing, per-user libraries. */
-export function createAppContext(config: AppConfig = loadAppConfig()): AppContext {
-    const db = new Database(config.databasePath);
-    const auth = config.authRequired ? new AuthService(db, { sessionTtlDays: config.sessionTtlDays }) : null;
-    const billing = config.authRequired
+/**
+ * Build the real thing: database, settings, accounts, billing, per-user
+ * libraries.
+ *
+ * `seed` supplies the bootstrap (where the data lives) and the values a fresh
+ * settings table is filled with. After boot the table is authoritative, so
+ * `config` below is a live view rather than a snapshot: an admin raising a quota
+ * expects it to apply to the next request, not the next restart.
+ */
+export function createAppContext(seed: AppConfig = loadAppConfig()): AppContext {
+    const db = new Database(seed.databasePath);
+    const settings = new SettingsService(db, {
+        bootstrap: {
+            dataRoot: seed.dataRoot,
+            databasePath: seed.databasePath,
+            localUserId: seed.localUserId,
+        },
+        seedValues: appConfigToValues(seed),
+    });
+
+    // `auth.enabled` decides which services exist, so it is read once, here —
+    // which is what makes it a restart-required setting in the schema.
+    const withAccounts = seed.authRequired;
+
+    const auth = withAccounts
+        ? new AuthService(db, { sessionTtlDays: (): number => settings.number('auth.sessionTtlDays') })
+        : null;
+    const billing = withAccounts
         ? new BillingService(db, {
-            defaultQuota: config.defaultQuota,
-            globalDailyTokenLimit: config.globalDailyTokenLimit,
-            maxConcurrentStreamsPerUser: config.maxConcurrentStreamsPerUser,
+            defaultQuota: () => settings.appConfig().defaultQuota,
+            globalDailyTokenLimit: (): number => settings.number('quota.globalDailyTokens'),
+            maxConcurrentStreamsPerUser: (): number => settings.number('quota.maxStreams'),
         })
         : null;
 
@@ -245,24 +278,27 @@ export function createAppContext(config: AppConfig = loadAppConfig()): AppContex
 
     // Credits and the market both need accounts (a balance or a public listing with
     // no one to own it is meaningless), so they only exist in multi-user mode.
-    const credits = config.authRequired
+    const credits = withAccounts
         ? new CreditService(db, {
-            initialGrant: config.credits.initialGrant,
-            checkinAmount: config.credits.checkinAmount,
-            inviteReward: config.credits.inviteReward,
-            inviteeReward: config.credits.inviteeReward,
-            tokensPerCredit: config.credits.tokensPerCredit,
+            initialGrant: (): number => settings.number('credits.signup'),
+            checkinAmount: (): number => settings.number('credits.checkin'),
+            inviteReward: (): number => settings.number('credits.invite'),
+            inviteeReward: (): number => settings.number('credits.invitee'),
+            tokensPerCredit: (): number => settings.number('credits.tokensPerCredit'),
         })
         : null;
-    const market = config.authRequired && config.marketEnabled ? new MarketService(db) : null;
+
+    // Always built alongside accounts: `market.enabled` is a live gate on the
+    // routes, so switching the market off does not need a restart.
+    const market = withAccounts ? new MarketService(db) : null;
 
     const libraryFor = (userId: string): Library => {
         // Single-user mode points straight at a SillyTavern data directory; with
         // accounts, every user gets their own tree so isolation is a filesystem
         // boundary rather than a query filter.
-        const root = config.authRequired
-            ? path.join(config.dataRoot, 'users', userId)
-            : config.dataRoot;
+        const root = withAccounts
+            ? path.join(seed.dataRoot, 'users', userId)
+            : seed.dataRoot;
 
         const existing = libraries.get(root);
         if (existing !== undefined) {
@@ -275,7 +311,10 @@ export function createAppContext(config: AppConfig = loadAppConfig()): AppContex
     };
 
     return {
-        config,
+        get config(): AppConfig {
+            return settings.appConfig();
+        },
+        settings,
         auth,
         billing,
         credits,
@@ -291,8 +330,11 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
         ? singleUserContext(contextOrLibrary)
         : contextOrLibrary;
 
-    const loadConfig = options.loadModelConfig ?? ((): Promise<ModelConfig> => loadModelConfig());
-    const defaultPersona = options.personaName ?? process.env.STORY_PERSONA_NAME ?? 'User';
+    // The model gateway and the persona are settings, so they are read per
+    // request rather than captured here.
+    const loadConfig = options.loadModelConfig
+        ?? ((): Promise<ModelConfig> => Promise.resolve(toModelConfig(context.config.model)));
+    const personaName = (): string => options.personaName ?? context.config.personaName;
 
     return http.createServer((request, response) => {
         void (async () => {
@@ -495,7 +537,7 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                     }
 
                     if (method === 'GET' && action === 'favorites') {
-                        if (context.market === null) {
+                        if (context.market === null || !context.config.marketEnabled) {
                             return sendJson(response, 400, { error: 'market_disabled', message: 'the character market is not enabled on this server' });
                         }
 
@@ -588,6 +630,58 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                     }
                 }
 
+                // ------------------------------------------------------ settings
+
+                // Runtime configuration: the whole point is that changing the
+                // model key or a quota is an update, not a redeploy. Admin-only
+                // when there are accounts; in single-user mode the box is already
+                // yours. Secrets come back masked — the CLI is where you read one.
+                if (parts[2] === 'settings') {
+                    const settings = context.settings ?? null;
+
+                    if (settings === null) {
+                        return sendJson(response, 400, {
+                            error: 'settings_disabled',
+                            message: 'this server has no settings store behind it',
+                        });
+                    }
+
+                    if (user !== null && user.role !== 'admin') {
+                        return sendJson(response, 403, { error: 'forbidden', message: 'admin role required' });
+                    }
+
+                    if (method === 'GET') {
+                        return sendJson(response, 200, { entries: settings.list() });
+                    }
+
+                    if (method === 'POST' && parts[3] === 'reset') {
+                        const body = JSON.parse((await readBody(request)).toString('utf8') || '{}') as { keys?: unknown };
+                        const keys = Array.isArray(body.keys) ? body.keys.map(String) : [];
+
+                        try {
+                            return sendJson(response, 200, { entries: settings.reset(keys) });
+                        } catch (error) {
+                            return sendJson(response, 400, {
+                                error: 'invalid_setting',
+                                message: error instanceof Error ? error.message : String(error),
+                            });
+                        }
+                    }
+
+                    if (method === 'PUT') {
+                        const body = JSON.parse((await readBody(request)).toString('utf8') || '{}') as Record<string, unknown>;
+
+                        try {
+                            return sendJson(response, 200, { entries: settings.set(body) });
+                        } catch (error) {
+                            return sendJson(response, 400, {
+                                error: 'invalid_setting',
+                                message: error instanceof Error ? error.message : String(error),
+                            });
+                        }
+                    }
+                }
+
                 const resource = parts[2];
                 const id = decodeSegment(parts[3]);
                 // Chat and character ids are URL-encoded on the way in (names contain
@@ -599,7 +693,7 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                 // ------------------------------------------------------ market
 
                 if (resource === 'market') {
-                    if (context.market === null) {
+                    if (context.market === null || !context.config.marketEnabled) {
                         return sendJson(response, 400, {
                             error: 'market_disabled',
                             message: 'the character market needs accounts, and must be enabled with STORY_MARKET',
@@ -711,7 +805,7 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                 }
 
                 if (resource === 'rankings' && method === 'GET') {
-                    if (context.market === null) {
+                    if (context.market === null || !context.config.marketEnabled) {
                         return sendJson(response, 400, { error: 'market_disabled' });
                     }
 
@@ -780,7 +874,7 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                     // Publishing snapshots the card into the market listing, so
                     // browsing never reads every user's directory.
                     if (id !== undefined && sub === 'publish') {
-                        if (context.market === null || user === null) {
+                        if (context.market === null || !context.config.marketEnabled || user === null) {
                             return sendJson(response, 400, {
                                 error: 'market_disabled',
                                 message: 'publishing needs accounts, and must be enabled with STORY_MARKET',
@@ -859,7 +953,7 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
 
                         const created = await ChatSession.create(library, {
                             cardId: body.cardId,
-                            personaName: body.personaName ?? defaultPersona,
+                            personaName: body.personaName ?? personaName(),
                             memory: context.config.memory,
                             ...(body.name !== undefined ? { name: body.name } : {}),
                             ...(body.greetingIndex !== undefined ? { greetingIndex: body.greetingIndex } : {}),
@@ -917,7 +1011,7 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                         }
 
                         const session = await ChatSession.load(library, id, sub, {
-                            personaName: defaultPersona,
+                            personaName: personaName(),
                             memory: context.config.memory,
                         });
                         const removed = session.deleteMessage(index);
@@ -941,7 +1035,7 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                         }
 
                         const session = await ChatSession.load(library, id, sub, {
-                            personaName: defaultPersona,
+                            personaName: personaName(),
                             memory: context.config.memory,
                         });
 
@@ -987,7 +1081,7 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                         }
 
                         const session = await ChatSession.load(library, id, sub, {
-                            personaName: body.personaName ?? defaultPersona,
+                            personaName: body.personaName ?? personaName(),
                             memory: context.config.memory,
                         });
 
@@ -1289,41 +1383,59 @@ function clearSessionCookie(response: http.ServerResponse): void {
     response.setHeader('Set-Cookie', `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
 }
 
-function parseArgs(argv: string[]): { root: string; port: number; host: string } {
-    let root = process.env.STORY_DATA_ROOT ?? './data';
-    let port = Number(process.env.PORT ?? 8787);
-    let host = process.env.STORY_HOST ?? '127.0.0.1';
+/**
+ * `--root` is the one piece of configuration that cannot live in the database:
+ * it says where the data *is*, and the database is reached through it.
+ *
+ * `--port`/`--host` are one-shot overrides for a throwaway run. Normally those
+ * come from `server.port` / `server.host` in settings, so they survive a restart
+ * and can be changed without editing anything.
+ */
+function parseArgs(argv: string[]): { root?: string; port?: number; host?: string } {
+    const parsed: { root?: string; port?: number; host?: string } = {};
 
     for (let i = 0; i < argv.length; i++) {
         const arg = argv[i];
         if (arg === '--root' && argv[i + 1]) {
-            root = argv[i + 1] as string;
+            parsed.root = argv[i + 1];
             i += 1;
         } else if (arg === '--port' && argv[i + 1]) {
-            port = Number(argv[i + 1]);
+            parsed.port = Number(argv[i + 1]);
             i += 1;
         } else if (arg === '--host' && argv[i + 1]) {
-            host = argv[i + 1] as string;
+            parsed.host = argv[i + 1];
             i += 1;
         }
     }
 
-    return { root, port, host };
+    return parsed;
 }
 
 // Only start listening when executed directly, so tests can import createServer.
 if (import.meta.url === `file://${process.argv[1]}`) {
     const args = parseArgs(process.argv.slice(2));
-    const config = loadAppConfig();
-    const app = createAppContext({ ...config, dataRoot: args.root });
+    const seed = loadAppConfig();
+    const app = createAppContext(args.root === undefined ? seed : { ...seed, dataRoot: args.root });
 
-    createServer(app).listen(args.port, args.host, () => {
-        console.log(`story-core listening on http://${args.host}:${args.port}`);
-        console.log(`data root:      ${args.root}`);
-        console.log(`database:       ${config.databasePath}`);
-        console.log(`accounts:       ${config.authRequired ? 'enabled' : 'disabled (single user)'}`);
+    const host = args.host ?? app.config.serverHost;
+    const port = args.port ?? app.config.serverPort;
 
-        if (config.authRequired) {
+    createServer(app).listen(port, host, () => {
+        console.log(`story-core listening on http://${host}:${port}`);
+        console.log(`data root:      ${app.config.dataRoot}`);
+        console.log(`database:       ${app.config.databasePath}`);
+        console.log(`accounts:       ${app.config.authRequired ? 'enabled' : 'disabled (single user)'}`);
+
+        try {
+            const model = app.settings.modelConfig();
+            console.log(`model:          ${model.model} at ${model.endpoint}`);
+        } catch {
+            console.log('model:          not configured — turns will be refused until you set');
+            console.log('                model.endpoint / model.name / model.apiKey in the admin UI');
+            console.log('                or `node src/cli.ts settings set <key> <value>`');
+        }
+
+        if (app.config.authRequired) {
             const users = app.auth?.count() ?? 0;
             console.log(users === 0
                 ? 'no accounts yet: POST /api/v1/auth/register to create the first (admin) one'

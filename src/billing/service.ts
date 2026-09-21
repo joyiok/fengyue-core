@@ -16,7 +16,7 @@
  */
 import { randomUUID } from 'node:crypto';
 
-import type { QuotaPolicy } from '../config.ts';
+import { live, type MaybeLive, type QuotaPolicy } from '../config.ts';
 import type { Database } from '../db/database.ts';
 
 export type QuotaScope = 'daily' | 'monthly' | 'global' | 'concurrency' | 'per_request';
@@ -99,28 +99,38 @@ function nextMonthReset(at: Date): string {
 }
 
 export interface BillingServiceOptions {
-    defaultQuota: QuotaPolicy;
+    defaultQuota: MaybeLive<QuotaPolicy>;
     /** Circuit breaker across all users. 0 = unlimited. */
-    globalDailyTokenLimit?: number;
-    maxConcurrentStreamsPerUser?: number;
+    globalDailyTokenLimit?: MaybeLive<number>;
+    maxConcurrentStreamsPerUser?: MaybeLive<number>;
     now?: () => Date;
 }
 
 export class BillingService {
     readonly #db: Database;
-    readonly #defaultQuota: QuotaPolicy;
-    readonly #globalLimit: number;
-    readonly #maxStreams: number;
+    readonly #options: BillingServiceOptions;
     readonly #now: () => Date;
     /** userId -> reservationId -> reservation */
     readonly #reservations = new Map<string, Map<string, Reservation>>();
 
     constructor(db: Database, options: BillingServiceOptions) {
         this.#db = db;
-        this.#defaultQuota = options.defaultQuota;
-        this.#globalLimit = options.globalDailyTokenLimit ?? 0;
-        this.#maxStreams = options.maxConcurrentStreamsPerUser ?? 2;
+        this.#options = options;
         this.#now = options.now ?? ((): Date => new Date());
+    }
+
+    // Read on every use rather than copied at construction: these are settings,
+    // and an operator raising a limit expects it to apply to the next request.
+    get #defaultQuota(): QuotaPolicy {
+        return live(this.#options.defaultQuota);
+    }
+
+    get #globalLimit(): number {
+        return live(this.#options.globalDailyTokenLimit ?? 0);
+    }
+
+    get #maxStreams(): number {
+        return live(this.#options.maxConcurrentStreamsPerUser ?? 2);
     }
 
     policyFor(userId: string): QuotaPolicy {

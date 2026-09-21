@@ -1,10 +1,5 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
-
-import { loadModelConfig } from '../src/gateway/config.ts';
 import { createChatCompletion } from '../src/gateway/openai.ts';
 import { ModelError, describeModelConfig, type ModelConfig } from '../src/gateway/types.ts';
 import { startMockModel, respondWith } from './helpers/mock-model.ts';
@@ -165,50 +160,11 @@ test('an explicit upstream error payload is reported', async () => {
     }
 });
 
-test('configuration comes from the file and is overridden by the environment', async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), 'story-config-'));
-    const configPath = path.join(dir, 'story.config.json');
-
-    try {
-        await writeFile(configPath, JSON.stringify({
-            model: { endpoint: 'https://file.example/v1', model: 'file-model', apiKey: 'file-key', temperature: 0.5 },
-        }));
-
-        const fromFile = await loadModelConfig({ configPath, env: {} });
-        assert.equal(fromFile.endpoint, 'https://file.example/v1');
-        assert.equal(fromFile.model, 'file-model');
-        assert.equal(fromFile.apiKey, 'file-key');
-        assert.equal(fromFile.temperature, 0.5);
-
-        const fromEnv = await loadModelConfig({
-            configPath,
-            env: {
-                STORY_MODEL_ENDPOINT: 'https://env.example/v1',
-                STORY_MODEL_NAME: 'env-model',
-                STORY_MODEL_API_KEY: 'env-key',
-                STORY_MODEL_TEMPERATURE: '1.2',
-            },
-        });
-        assert.equal(fromEnv.endpoint, 'https://env.example/v1');
-        assert.equal(fromEnv.model, 'env-model');
-        assert.equal(fromEnv.apiKey, 'env-key');
-        assert.equal(fromEnv.temperature, 1.2);
-    } finally {
-        await rm(dir, { recursive: true, force: true });
-    }
-});
-
-test('a missing endpoint or model is a clear error, and the key is never printed', async () => {
-    await assert.rejects(
-        loadModelConfig({ configPath: '/nonexistent/story.config.json', env: {} }),
-        /no model endpoint configured/,
-    );
-
-    await assert.rejects(
-        loadModelConfig({ configPath: '/nonexistent/story.config.json', env: { STORY_MODEL_ENDPOINT: 'https://x/v1' } }),
-        /no model name configured/,
-    );
-
+// Configuration used to come from a JSON file with the environment on top.
+// It is a `settings` row now (see test/settings.test.ts for the precedence
+// rules), and this is what is left of the gateway's own concern: what it
+// tells a human about what it is configured with.
+test('the described model never carries the key', () => {
     const described = describeModelConfig({ endpoint: 'https://x/v1', model: 'm', apiKey: 'sk-secret-value' });
     assert.equal(JSON.stringify(described).includes('sk-secret-value'), false);
     assert.equal(described.apiKey, '(set)');

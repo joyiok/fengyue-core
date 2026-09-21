@@ -54,16 +54,27 @@ Caddy 把 `/` 给了网页客户端，所以接口那个自述页只在应用端
 
 ## 模型网关
 
-`STORY_MODEL_ENDPOINT` 要指向一个 OpenAI 兼容的 `/chat/completions`，例如：
+**配置在数据库里，不在 `.env` 里**——改完立刻生效，不用重建容器：
 
 ```bash
-STORY_MODEL_ENDPOINT=https://api.deepseek.com/v1/chat/completions
-STORY_MODEL_NAME=deepseek-chat
-STORY_MODEL_API_KEY=sk-...
+cd /opt/story-core/deploy
+docker compose exec -T story-core node --disable-warning=ExperimentalWarning \
+  src/cli.ts --root /data settings set model.endpoint https://api.deepseek.com/v1/chat/completions
+docker compose exec -T story-core node --disable-warning=ExperimentalWarning \
+  src/cli.ts --root /data settings set model.name     deepseek-chat
+docker compose exec -T story-core node --disable-warning=ExperimentalWarning \
+  src/cli.ts --root /data settings set model.apiKey   sk-...
 ```
 
-没配也能启动：账号、角色卡、世界书、市场都正常，只是发一轮对话会返回 `503`。改完
-`.env` 后 `docker compose up -d` 重建容器即可。
+或者注册完管理员账号后在网页端改：**账户 → 设置 → 模型网关**。
+
+没配也能跑：账号、角色卡、世界书、市场都正常，只是发一轮对话会返回 `503`，启动日志里也会
+直说「model: not configured」。
+
+同样的规则适用于额度、积分、市场开关、摘要、注册开关、会话时长、监听端口——全部是
+`settings` 表里的行。**`.env` 只放基础设施**（数据在哪、域名、证书联系人、容器 uid、备份
+份数），见 [`.env.example`](.env.example) 顶部那段说明。唯一的例外是标了「重启」的三项：
+`auth.enabled`、`server.host`、`server.port`。
 
 ## 更新
 

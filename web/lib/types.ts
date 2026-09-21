@@ -188,6 +188,29 @@ export interface CompletionUsage {
 
 // ----------------------------------------------------------------- account
 
+// ----------------------------------------------------------------- settings
+
+export type SettingValue = number | boolean | string;
+
+export interface SettingEntry {
+    key: string;
+    type: 'number' | 'boolean' | 'string';
+    group: 'auth' | 'server' | 'model' | 'quota' | 'credits' | 'market' | 'memory' | 'chat';
+    description: string;
+    secret: boolean;
+    /** Read once at start-up: a change needs a restart. */
+    restart: boolean;
+    default: SettingValue;
+    bootValue: SettingValue;
+    /** Masked when `secret`. */
+    value: SettingValue;
+    secretSet?: boolean;
+    changed: boolean;
+    env?: string;
+}
+
+// ------------------------------------------------------------------ account
+
 export interface QuotaPolicy {
     dailyTokenLimit: number;
     monthlyTokenLimit: number;

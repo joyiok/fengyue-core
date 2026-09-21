@@ -12,6 +12,7 @@ import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 
 import { AdminPanel } from '@/components/AdminPanel';
+import { SettingsPanel } from '@/components/SettingsPanel';
 import { Icon } from '@/components/icons';
 import { Loading, Meter, Notice } from '@/components/ui';
 import { get, post } from '@/lib/api';
@@ -257,7 +258,12 @@ export default function AccountPage(): React.JSX.Element {
                 </div>
             )}
 
-            {role === 'admin' ? <AdminPanel /> : null}
+            {role === 'admin' ? (
+                <>
+                    <SettingsPanel />
+                    <AdminPanel />
+                </>
+            ) : null}
         </div>
     );
 }

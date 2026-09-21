@@ -15,6 +15,7 @@
  */
 import { randomBytes } from 'node:crypto';
 
+import { live, type MaybeLive } from '../config.ts';
 import type { Database } from '../db/database.ts';
 
 export type CreditReason = 'signup' | 'checkin' | 'invite' | 'invitee' | 'turn' | 'admin';
@@ -57,35 +58,49 @@ export interface CreditSummary {
 
 export interface CreditServiceOptions {
     /** Granted once, when an account is created. */
-    initialGrant?: number;
+    initialGrant?: MaybeLive<number>;
     /** Granted once per UTC day by checking in. */
-    checkinAmount?: number;
+    checkinAmount?: MaybeLive<number>;
     /** Granted to the inviter when their code is redeemed. */
-    inviteReward?: number;
+    inviteReward?: MaybeLive<number>;
     /** Granted to the person who redeems a code. */
-    inviteeReward?: number;
+    inviteeReward?: MaybeLive<number>;
     /** How many tokens one credit buys. */
-    tokensPerCredit?: number;
+    tokensPerCredit?: MaybeLive<number>;
     now?: () => Date;
 }
 
 export class CreditService {
     readonly #db: Database;
-    readonly #initialGrant: number;
-    readonly #checkinAmount: number;
-    readonly #inviteReward: number;
-    readonly #inviteeReward: number;
-    readonly #tokensPerCredit: number;
+    readonly #options: CreditServiceOptions;
     readonly #now: () => Date;
 
     constructor(db: Database, options: CreditServiceOptions = {}) {
         this.#db = db;
-        this.#initialGrant = options.initialGrant ?? 100;
-        this.#checkinAmount = options.checkinAmount ?? 10;
-        this.#inviteReward = options.inviteReward ?? 50;
-        this.#inviteeReward = options.inviteeReward ?? 50;
-        this.#tokensPerCredit = Math.max(1, options.tokensPerCredit ?? 1000);
+        this.#options = options;
         this.#now = options.now ?? ((): Date => new Date());
+    }
+
+    // Read on every use: prices and rewards are settings, and changing one has
+    // to apply to the next turn rather than the next restart.
+    get #initialGrant(): number {
+        return live(this.#options.initialGrant ?? 100);
+    }
+
+    get #checkinAmount(): number {
+        return live(this.#options.checkinAmount ?? 10);
+    }
+
+    get #inviteReward(): number {
+        return live(this.#options.inviteReward ?? 50);
+    }
+
+    get #inviteeReward(): number {
+        return live(this.#options.inviteeReward ?? 50);
+    }
+
+    get #tokensPerCredit(): number {
+        return Math.max(1, live(this.#options.tokensPerCredit ?? 1000));
     }
 
     get initialGrant(): number {

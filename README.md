@@ -152,6 +152,8 @@ node src/cli.ts credits invite owner --count 3
 node src/cli.ts market list --sort hot --limit 10
 node src/cli.ts market publish owner linzhao --root ./data/users/<user-id>
 node src/cli.ts market unpublish owner linzhao
+node src/cli.ts settings list                 # 全部配置 + 是否已改 + 是否要重启
+node src/cli.ts settings set model.name deepseek-chat
 ```
 
 ### M5 — 滚动摘要记忆
@@ -241,6 +243,33 @@ M1 的窗口只保留最近若干条；M5 补上被挤出去的那部分。做�
 3. **`requestId` 是一次“说这句话”的尝试。** 同一句话重试复用同一个 id，命中日志里的
    回复就不会再调模型、再扣一次费。
 
+### 配置在哪里
+
+**环境变量说数据在哪，`settings` 表说服务怎么跑。**
+
+启动时给 `settings` 的每个键写一行：有对应环境变量就用它，否则用出厂默认值（`INSERT OR
+IGNORE`）。**这是环境变量唯一被读取的时刻**；行一旦存在就是它说了算。所以：
+
+- 改模型 key、改额度、关掉市场 → 改数据库，立刻生效，不重启
+- 改 `.env` → 对已经在跑的实例没有任何影响（有意如此，见上一条）
+- 想回到出厂值 → `settings reset <key>`，它写回启动时那一行的值
+
+三个例外标了 `restart`：`auth.enabled`（决定要不要建账号服务，也决定数据目录布局）、
+`server.host` / `server.port`（监听地址在启动时绑一次）。
+
+改的方式三选一：网页端「账户 → 设置」、`node src/cli.ts settings set <key> <value>`、或者
+`PUT /api/v1/settings`（管理员）。`settings list` 会把每个键的值、是否已改、是不是要重启
+都列出来；`model.apiKey` 这类密钥走 HTTP 一律打码，只有 CLI 会显示原文。
+
+存储就是一个三列的小表：
+
+```sql
+CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
+```
+
+值按 JSON 存，所以数字还是数字、布尔还是布尔。每次读都是一次主键查找，不缓存——CLI 在
+服务运行时改了值，服务下一次读就能看见。
+
 ## 用法
 
 ```bash
@@ -258,15 +287,17 @@ node src/cli.ts worldbooks
 node src/cli.ts preview linzhao "今天有点累"     # 只看提示词，不调模型
 ```
 
-配置模型（两种方式，环境变量优先）：
+配置模型——配置在数据库里，改完即生效：
 
 ```bash
-cp story.config.example.json story.config.json && $EDITOR story.config.json
-# 或者
-export STORY_MODEL_ENDPOINT=https://api.deepseek.com/v1/chat/completions
-export STORY_MODEL_NAME=deepseek-chat
-export STORY_MODEL_API_KEY=sk-...
+node src/cli.ts settings set model.endpoint https://api.deepseek.com/v1/chat/completions
+node src/cli.ts settings set model.name     deepseek-chat
+node src/cli.ts settings set model.apiKey   sk-...
+# 或者在网页端：账户 → 设置（管理员）
 ```
+
+配不齐会怎样：`GET /api/v1/model` 说 `configured: false`，发一轮返回 `503`，其余（账号、
+角色卡、世界书、市场）照常。
 
 对话：
 
@@ -325,6 +356,9 @@ GET    /api/v1/market/:ownerId/:characterId/card.png    已发布卡的头像
 GET    /api/v1/market/:ownerId/:characterId/card.json   已发布卡的完整内容
 DELETE /api/v1/chats/:cardId/:chatName         删一个会话
 DELETE /api/v1/chats/:cardId/:chatName/messages/:index  删一条消息
+GET    /api/v1/settings                     全部配置（管理员；密钥打码）
+PUT    /api/v1/settings                     改配置 {"model.name":"…"}（管理员）
+POST   /api/v1/settings/reset               改回启动值 {"keys":["…"]}（管理员）
 ```
 
 `GET /api/v1/chats/:cardId/:chatName` 带 `?offset=&limit=` 可以分页（都不给就是整份，
@@ -462,7 +496,8 @@ primary world，没有“一本都不要”这个表达）。
 - 依赖策略：运行时零依赖。PNG 用内置 `zlib`，HTTP 用内置 `node:http`，测试用内置 `node:test`
 - token 数是**估算**（CJK 约 1 token/字，ASCII 约 4 字符/token）。精确计数需要目标模型自己的分词器，M3 之后再按需接入
 - 单用户模式（`STORY_AUTH=off`，默认 `./data`）没有鉴权，只应监听回环；开启账号后每个数据接口都要求 Bearer token 或会话 cookie
-- 账号相关的环境变量：`STORY_AUTH`、`STORY_DB`、`STORY_DATA_ROOT`、`STORY_ALLOW_REGISTRATION`、`STORY_DAILY_TOKENS`、`STORY_MONTHLY_TOKENS`、`STORY_MAX_TOKENS_PER_REQUEST`、`STORY_GLOBAL_DAILY_TOKENS`、`STORY_MAX_STREAMS`、`STORY_SESSION_TTL_DAYS`、`STORY_MEMORY*`
-- 积分与市场的环境变量：`STORY_CREDITS_SIGNUP`（注册赠送，默认 100）、`STORY_CREDITS_CHECKIN`（签到，10）、`STORY_CREDITS_INVITE` / `STORY_CREDITS_INVITEE`（邀请双边，各 50）、`STORY_TOKENS_PER_CREDIT`（默认 1000）、`STORY_MARKET`（`off` 关掉市场）
+- **环境变量只剩「数据在哪」**：`STORY_DB`（SQLite 文件）、`STORY_DATA_ROOT`（用户库的根）、`STORY_LIBRARY_ROOT`（CLI 单用户模式直接指向某个库）。其余一切——模型网关、额度、积分、市场、摘要、注册开关、会话时长、监听地址端口——都是 `settings` 表里的一行
+- **环境变量只在某个键还没有值时填一次**，之后不再读取。所以改 `.env` 对已经在跑的实例没有影响，这正是目的：要改就改数据库（网页端或 `cli.ts settings set`），不用重启
+- `auth.enabled` / `server.host` / `server.port` 是启动时读一次的，改它们要重启，界面上标了「重启」
 - `node:sqlite` 是实验特性，换 Postgres 时只需替换 `src/db/database.ts`；预留表在内存里，多实例要挪到 Redis
 - 直接对酒馆的数据目录写入前请先备份（读是安全的）

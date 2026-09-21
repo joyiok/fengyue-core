@@ -30,40 +30,12 @@ services:
     stop_grace_period: 30s
     environment:
       TZ: "${TZ:-Asia/Shanghai}"
-      # Accounts. With accounts on, every library lives in <data>/users/<id>/
-      # and every data route needs a token or a session cookie.
-      STORY_AUTH: "${STORY_AUTH:-on}"
-      STORY_ALLOW_REGISTRATION: "${STORY_ALLOW_REGISTRATION:-on}"
-      STORY_SESSION_TTL_DAYS: "${STORY_SESSION_TTL_DAYS:-30}"
-
-      # Model gateway (OpenAI-compatible). Empty until an operator fills them.
-      STORY_MODEL_ENDPOINT: "${STORY_MODEL_ENDPOINT:-}"
-      STORY_MODEL_NAME: "${STORY_MODEL_NAME:-}"
-      STORY_MODEL_API_KEY: "${STORY_MODEL_API_KEY:-}"
-      STORY_MODEL_MAX_TOKENS: "${STORY_MODEL_MAX_TOKENS:-2048}"
-      STORY_MODEL_TIMEOUT_MS: "${STORY_MODEL_TIMEOUT_MS:-120000}"
-
-      # The operator's ceiling: tokens per day/month, per request, and a
-      # service-wide circuit breaker. 0 means unlimited.
-      STORY_DAILY_TOKENS: "${STORY_DAILY_TOKENS:-200000}"
-      STORY_MONTHLY_TOKENS: "${STORY_MONTHLY_TOKENS:-3000000}"
-      STORY_MAX_TOKENS_PER_REQUEST: "${STORY_MAX_TOKENS_PER_REQUEST:-2048}"
-      STORY_GLOBAL_DAILY_TOKENS: "${STORY_GLOBAL_DAILY_TOKENS:-0}"
-      STORY_MAX_STREAMS: "${STORY_MAX_STREAMS:-2}"
-
-      # Credits and the character market.
-      STORY_CREDITS_SIGNUP: "${STORY_CREDITS_SIGNUP:-100}"
-      STORY_CREDITS_CHECKIN: "${STORY_CREDITS_CHECKIN:-10}"
-      STORY_CREDITS_INVITE: "${STORY_CREDITS_INVITE:-50}"
-      STORY_CREDITS_INVITEE: "${STORY_CREDITS_INVITEE:-50}"
-      STORY_TOKENS_PER_CREDIT: "${STORY_TOKENS_PER_CREDIT:-1000}"
-      STORY_MARKET: "${STORY_MARKET:-on}"
-
-      # Rolling summary memory.
-      STORY_MEMORY: "${STORY_MEMORY:-on}"
-      STORY_MEMORY_THRESHOLD: "${STORY_MEMORY_THRESHOLD:-40}"
-      STORY_MEMORY_KEEP_RECENT: "${STORY_MEMORY_KEEP_RECENT:-12}"
-      STORY_MEMORY_MAX_TOKENS: "${STORY_MEMORY_MAX_TOKENS:-500}"
+      # That is the whole list. Application configuration — the model gateway,
+      # quotas, credits, the market, memory — lives in the `settings` table and
+      # is edited in the admin UI or with `src/cli.ts settings set`, so none of
+      # it needs a rebuild or a restart. The image's own ENV supplies the seed
+      # values a fresh database starts from (see deploy/Dockerfile and
+      # src/settings/schema.ts).
     volumes:
       - ./data:/data:rw
     ports:

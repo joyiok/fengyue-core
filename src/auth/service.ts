@@ -7,6 +7,7 @@
  */
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
+import { live, type MaybeLive } from '../config.ts';
 import type { Database } from '../db/database.ts';
 import { DEFAULT_KDF, hashPassword, passwordProblem, verifyPassword, type KdfParams } from './passwords.ts';
 
@@ -79,7 +80,7 @@ export function normalizeHandle(handle: string): string {
 }
 
 export interface AuthServiceOptions {
-    sessionTtlDays?: number;
+    sessionTtlDays?: MaybeLive<number>;
     /** Injected by tests to keep password hashing fast. */
     kdf?: KdfParams;
     now?: () => Date;
@@ -87,15 +88,20 @@ export interface AuthServiceOptions {
 
 export class AuthService {
     readonly #db: Database;
-    readonly #ttlDays: number;
+    readonly #options: AuthServiceOptions;
     readonly #kdf: KdfParams;
     readonly #now: () => Date;
 
     constructor(db: Database, options: AuthServiceOptions = {}) {
         this.#db = db;
-        this.#ttlDays = options.sessionTtlDays ?? 30;
+        this.#options = options;
         this.#kdf = options.kdf ?? DEFAULT_KDF;
         this.#now = options.now ?? ((): Date => new Date());
+    }
+
+    /** Read on every use: session lifetime is a setting. */
+    get #ttlDays(): number {
+        return live(this.#options.sessionTtlDays ?? 30);
     }
 
     #hashToken(token: string): string {

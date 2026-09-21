@@ -146,6 +146,27 @@ const MIGRATIONS: Migration[] = [
             `CREATE INDEX IF NOT EXISTS idx_stats_day ON character_stats(day)`,
         ],
     },
+    {
+        version: 3,
+        statements: [
+            // Runtime configuration. Every key in settings/schema.ts has exactly
+            // one row, written at start-up from the environment (or the shipped
+            // default) and edited here afterwards. `boot_value` is what that row
+            // was filled in with, kept so `changed` and `reset` mean the same to
+            // every process — a CLI started without the deployment's environment
+            // would otherwise compute a different "boot value" than the server
+            // did, and `reset` would write the wrong thing back.
+            //
+            // Values are JSON so a number stays a number and a boolean stays a
+            // boolean.
+            `CREATE TABLE IF NOT EXISTS settings (
+                key        TEXT PRIMARY KEY,
+                value      TEXT NOT NULL,
+                boot_value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )`,
+        ],
+    },
 ];
 
 export class Database {

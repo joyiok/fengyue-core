@@ -24,15 +24,15 @@ import path from 'node:path';
 import { AuthService } from './auth/service.ts';
 import { BillingService } from './billing/service.ts';
 import { ChatSession } from './chat/session.ts';
-import { loadAppConfig } from './config.ts';
+import { appConfigToValues, bootstrapOf, loadAppConfig, type AppConfig } from './config.ts';
 import { CreditService } from './credits/service.ts';
 import { Database } from './db/database.ts';
 import type { ChatMessage } from './chats/types.ts';
-import { loadModelConfig } from './gateway/config.ts';
-import { describeModelConfig } from './gateway/types.ts';
+import { describeModelConfig, type ModelConfig } from './gateway/types.ts';
 import { Library } from './library.ts';
 import { MarketService } from './market/service.ts';
 import { assemblePrompt } from './prompt/assemble.ts';
+import { SettingsService } from './settings/service.ts';
 
 function usage(): never {
     console.log(`
@@ -63,9 +63,14 @@ Commands:
   market publish <handle> <cardId> [--root DIR]     publish a card
   market unpublish <handle> <cardId>       withdraw a published card
 
+  settings list                     every setting, its value and where it came from
+  settings get <key>                one value (a secret is shown here, masked over HTTP)
+  settings set <key> <value>        change one: takes effect without a restart
+  settings reset <key> [...]        put keys back to their boot value
+
 Options:
   --root <dir>                  library root (default: $STORY_LIBRARY_ROOT or ./library)
-  --persona <name>              name used for {{user}} (default: $STORY_PERSONA_NAME or User)
+  --persona <name>              name used for {{user}} (default: the chat.personaName setting)
   --stream                      stream the reply as it is generated (ask/say/regen)
   --json                        machine-readable output for ask/say/regen
   --db <path>                   account database (default: $STORY_DB or ./story.sqlite)
@@ -89,7 +94,7 @@ function splitArgs(args: string[]): { positional: string[]; option: (name: strin
 
 function takeRoot(argv: string[]): {
     root: string;
-    persona: string;
+    persona: string | undefined;
     json: boolean;
     stream: boolean;
     dbPath: string;
@@ -97,7 +102,7 @@ function takeRoot(argv: string[]): {
 } {
     let root = process.env.STORY_LIBRARY_ROOT ?? './library';
     let dbPath = process.env.STORY_DB ?? './story.sqlite';
-    let persona = process.env.STORY_PERSONA_NAME ?? 'User';
+    let persona: string | undefined;
     let json = false;
     let stream = false;
     const rest: string[] = [];
@@ -136,6 +141,17 @@ async function main(): Promise<number> {
     const { root, persona, json, stream, dbPath, rest } = takeRoot(process.argv.slice(2));
     const [command, ...args] = rest;
 
+    // Configuration lives in the database. This seeds the table on first use
+    // from the environment (exactly as a server boot does) and reads it after
+    // that, so `settings set` and a running server see the same values.
+    const seed = loadAppConfig();
+    const settings = new SettingsService(new Database(dbPath), {
+        bootstrap: bootstrapOf(seed),
+        seedValues: appConfigToValues(seed),
+    });
+    const appConfig: AppConfig = settings.appConfig();
+    const personaName = persona ?? appConfig.personaName;
+
     /**
      * Keep rolling memory up to date after a turn.
      *
@@ -143,7 +159,7 @@ async function main(): Promise<number> {
      * it just runs the pass when one is due. Without this, conversations started
      * from the command line would never get a summary.
      */
-    const maintainMemory = async (session: ChatSession, modelConfig: Awaited<ReturnType<typeof loadModelConfig>>): Promise<void> => {
+    const maintainMemory = async (session: ChatSession, modelConfig: ModelConfig): Promise<void> => {
         if (session.summaryPlan() === null) {
             return;
         }
@@ -262,7 +278,7 @@ async function main(): Promise<number> {
                 card,
                 history,
                 userMessage: message,
-                options: { personaName: persona },
+                options: { personaName },
                 worldbook,
             });
 
@@ -299,11 +315,11 @@ async function main(): Promise<number> {
             const [id, message] = args;
             if (!id || !message) usage();
 
-            const config = await loadModelConfig();
+            const config = settings.modelConfig();
             const session = await ChatSession.create(library, {
                 cardId: id,
-                personaName: persona,
-                memory: loadAppConfig().memory,
+                personaName,
+                memory: appConfig.memory,
             });
             const result = await session.send(config, message, onDelta ? { onDelta } : {});
             await maintainMemory(session, config);
@@ -336,10 +352,10 @@ async function main(): Promise<number> {
             const [id, chatName, message] = args;
             if (!id || !chatName || !message) usage();
 
-            const config = await loadModelConfig();
+            const config = settings.modelConfig();
             const session = await ChatSession.load(library, id, chatName, {
-                personaName: persona,
-                memory: loadAppConfig().memory,
+                personaName,
+                memory: appConfig.memory,
             });
             const result = await session.send(config, message, onDelta ? { onDelta } : {});
             await maintainMemory(session, config);
@@ -372,10 +388,10 @@ async function main(): Promise<number> {
             const [id, chatName, newMessage] = args;
             if (!id || !chatName) usage();
 
-            const config = await loadModelConfig();
+            const config = settings.modelConfig();
             const session = await ChatSession.load(library, id, chatName, {
-                personaName: persona,
-                memory: loadAppConfig().memory,
+                personaName,
+                memory: appConfig.memory,
             });
             const result = await session.regenerate(config, {
                 ...(newMessage !== undefined ? { userMessageOverride: newMessage } : {}),
@@ -408,7 +424,7 @@ async function main(): Promise<number> {
         }
 
         case 'user': {
-            const config = loadAppConfig();
+            const config = appConfig;
             const db = new Database(dbPath);
             const auth = new AuthService(db, { sessionTtlDays: config.sessionTtlDays });
             const billing = new BillingService(db, {
@@ -510,7 +526,7 @@ async function main(): Promise<number> {
         }
 
         case 'credits': {
-            const config = loadAppConfig();
+            const config = appConfig;
             const db = new Database(dbPath);
             const auth = new AuthService(db, { sessionTtlDays: config.sessionTtlDays });
             const credits = new CreditService(db, {
@@ -581,7 +597,7 @@ async function main(): Promise<number> {
         }
 
         case 'market': {
-            const config = loadAppConfig();
+            const config = appConfig;
             const db = new Database(dbPath);
             const auth = new AuthService(db, { sessionTtlDays: config.sessionTtlDays });
             const market = new MarketService(db);
@@ -653,8 +669,70 @@ async function main(): Promise<number> {
             }
         }
 
+        case 'settings': {
+            const { positional } = splitArgs(args);
+            const [action, key, ...valueParts] = positional;
+
+            switch (action) {
+                case 'list': {
+                    for (const entry of settings.list()) {
+                        const shown = entry.secret ? String(entry.value) : JSON.stringify(entry.value);
+                        const flags = [
+                            entry.changed ? 'changed' : '',
+                            entry.restart ? 'restart' : '',
+                            entry.env === undefined ? '' : `seed=${entry.env}`,
+                        ].filter((part) => part !== '').join(' ');
+
+                        console.log(`${entry.key.padEnd(28)} ${String(shown).padEnd(26)} ${flags}`);
+                    }
+
+                    console.log('\nEvery key has exactly one row. `settings set` writes it and `settings reset`');
+                    console.log('puts it back to the value it booted with; the environment is consulted only to');
+                    console.log('fill a row in, so editing a variable under a running server does nothing.');
+                    return 0;
+                }
+
+                case 'get': {
+                    if (key === undefined) {
+                        usage();
+                    }
+                    // The operator's console: a secret is shown here and masked
+                    // everywhere it could reach a log or a browser.
+                    console.log(JSON.stringify(settings.get(key), null, 2));
+                    return 0;
+                }
+
+                case 'set': {
+                    if (key === undefined || valueParts.length === 0) {
+                        usage();
+                    }
+                    const [entry] = settings.set({ [key]: valueParts.join(' ') });
+                    if (entry === undefined) {
+                        usage();
+                    }
+                    console.log(`${entry.key} = ${JSON.stringify(entry.value)}`
+                        + `${entry.restart ? '   (restart before it takes effect)' : ''}`);
+                    return 0;
+                }
+
+                case 'reset': {
+                    const keys = [key, ...valueParts].filter((part): part is string => part !== undefined);
+                    if (keys.length === 0) {
+                        usage();
+                    }
+                    for (const entry of settings.reset(keys)) {
+                        console.log(`${entry.key} = ${JSON.stringify(entry.value)}`);
+                    }
+                    return 0;
+                }
+
+                default:
+                    usage();
+            }
+        }
+
         case 'model': {
-            console.log(JSON.stringify(describeModelConfig(await loadModelConfig()), null, 2));
+            console.log(JSON.stringify(describeModelConfig(settings.modelConfig()), null, 2));
             return 0;
         }
 
