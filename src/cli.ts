@@ -181,9 +181,11 @@ async function main(): Promise<number> {
 
     const library = new Library(root);
 
-    // The user commands work on the database only; creating a library directory
-    // for them would be a pointless side effect.
-    if (command !== 'user') {
+    // These commands work on the database only. Creating a library directory for
+    // them would be a pointless side effect — and in the container it is not even
+    // possible, since only /data is writable and `--root` is somewhere else.
+    const databaseOnly = ['user', 'settings', 'model'];
+    if (!databaseOnly.includes(command ?? '')) {
         await library.ensureDirs();
     }
 
