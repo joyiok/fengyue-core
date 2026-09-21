@@ -64,6 +64,17 @@ export interface WorldInfoStats {
     estimatedTokens: number;
 }
 
+export interface MemoryStats {
+    /** How many messages the summary stands in for. */
+    summarizedMessages: number;
+    /** How many summarization passes produced it. */
+    passes: number;
+    estimatedTokens: number;
+    updatedAt: string;
+    /** First characters of the injected summary, for debugging. */
+    preview: string;
+}
+
 export interface PromptStats {
     /** Which parts actually contributed a message. */
     sections: string[];
@@ -78,6 +89,8 @@ export interface PromptStats {
     budgetExceeded: boolean;
     /** Null when no world book was scanned at all. */
     worldInfo: WorldInfoStats | null;
+    /** Null when nothing has been summarized yet. */
+    memory: MemoryStats | null;
 }
 
 export const DEFAULT_MAIN_PROMPT = [

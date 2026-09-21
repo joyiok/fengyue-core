@@ -113,6 +113,24 @@ async function main(): Promise<number> {
     const { root, persona, json, stream, dbPath, rest } = takeRoot(process.argv.slice(2));
     const [command, ...args] = rest;
 
+    /**
+     * Keep rolling memory up to date after a turn.
+     *
+     * The HTTP server does this with quota accounting; the CLI has no accounts, so
+     * it just runs the pass when one is due. Without this, conversations started
+     * from the command line would never get a summary.
+     */
+    const maintainMemory = async (session: ChatSession, modelConfig: Awaited<ReturnType<typeof loadModelConfig>>): Promise<void> => {
+        if (session.summaryPlan() === null) {
+            return;
+        }
+
+        const summary = await session.summarize(modelConfig);
+        if (summary !== null) {
+            console.error(`[memory] summarized up to message ${summary.upTo} (pass ${summary.passes})`);
+        }
+    };
+
     /** Streams to stdout unless JSON output was requested. */
     const onDelta = json || !stream
         ? undefined
@@ -259,8 +277,13 @@ async function main(): Promise<number> {
             if (!id || !message) usage();
 
             const config = await loadModelConfig();
-            const session = await ChatSession.create(library, { cardId: id, personaName: persona });
+            const session = await ChatSession.create(library, {
+                cardId: id,
+                personaName: persona,
+                memory: loadAppConfig().memory,
+            });
             const result = await session.send(config, message, onDelta ? { onDelta } : {});
+            await maintainMemory(session, config);
 
             if (json) {
                 console.log(JSON.stringify({
@@ -291,8 +314,12 @@ async function main(): Promise<number> {
             if (!id || !chatName || !message) usage();
 
             const config = await loadModelConfig();
-            const session = await ChatSession.load(library, id, chatName, { personaName: persona });
+            const session = await ChatSession.load(library, id, chatName, {
+                personaName: persona,
+                memory: loadAppConfig().memory,
+            });
             const result = await session.send(config, message, onDelta ? { onDelta } : {});
+            await maintainMemory(session, config);
 
             if (json) {
                 console.log(JSON.stringify({
@@ -323,11 +350,15 @@ async function main(): Promise<number> {
             if (!id || !chatName) usage();
 
             const config = await loadModelConfig();
-            const session = await ChatSession.load(library, id, chatName, { personaName: persona });
+            const session = await ChatSession.load(library, id, chatName, {
+                personaName: persona,
+                memory: loadAppConfig().memory,
+            });
             const result = await session.regenerate(config, {
                 ...(newMessage !== undefined ? { userMessageOverride: newMessage } : {}),
                 ...(onDelta ? { onDelta } : {}),
             });
+            await maintainMemory(session, config);
 
             if (json) {
                 console.log(JSON.stringify({

@@ -13,6 +13,16 @@ export interface QuotaPolicy {
     maxTokensPerRequest: number;
 }
 
+export interface MemorySettings {
+    enabled: boolean;
+    /** Un-summarized messages needed before a pass runs. */
+    messageThreshold: number;
+    /** Messages that always stay verbatim. */
+    keepRecent: number;
+    /** Ceiling for the summary block (estimated tokens). */
+    maxSummaryTokens: number;
+}
+
 export interface AppConfig {
     /** Where per-user libraries live: `<dataRoot>/users/<userId>/`. */
     dataRoot: string;
@@ -29,6 +39,8 @@ export interface AppConfig {
     localUserId: string;
     /** Open registration. The very first account is always allowed (bootstrap). */
     allowRegistration: boolean;
+    /** Rolling summary memory. */
+    memory: MemorySettings;
 }
 
 function numberFrom(value: string | undefined, fallback: number): number {
@@ -57,5 +69,11 @@ export function loadAppConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
         maxConcurrentStreamsPerUser: numberFrom(env.STORY_MAX_STREAMS, 2),
         localUserId: 'local',
         allowRegistration: !['off', 'false', '0', 'no'].includes((env.STORY_ALLOW_REGISTRATION ?? 'on').trim().toLowerCase()),
+        memory: {
+            enabled: !['off', 'false', '0', 'no'].includes((env.STORY_MEMORY ?? 'on').trim().toLowerCase()),
+            messageThreshold: numberFrom(env.STORY_MEMORY_THRESHOLD, 40),
+            keepRecent: numberFrom(env.STORY_MEMORY_KEEP_RECENT, 12),
+            maxSummaryTokens: numberFrom(env.STORY_MEMORY_MAX_TOKENS, 500),
+        },
     };
 }

@@ -475,6 +475,7 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                         const created = await ChatSession.create(library, {
                             cardId: body.cardId,
                             personaName: body.personaName ?? defaultPersona,
+                            memory: context.config.memory,
                             ...(body.name !== undefined ? { name: body.name } : {}),
                             ...(body.greetingIndex !== undefined ? { greetingIndex: body.greetingIndex } : {}),
                             ...(body.worldbookIds !== undefined ? { worldbookIds: body.worldbookIds } : {}),
@@ -493,6 +494,34 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
 
                     if (method === 'GET' && id !== undefined && subId !== undefined && subId !== 'messages' && subId !== 'regenerate') {
                         return sendJson(response, 200, { character: id, name: subId, chat: await library.getChat(id, subId) });
+                    }
+
+                    // Force a summarization pass (same billing path as the automatic one).
+                    if (method === 'POST' && id !== undefined && sub !== undefined && subId === 'summarize') {
+                        let modelConfig: ModelConfig;
+                        try {
+                            modelConfig = await loadConfig();
+                        } catch (error) {
+                            return sendJson(response, 503, { error: error instanceof Error ? error.message : String(error) });
+                        }
+
+                        const session = await ChatSession.load(library, id, sub, {
+                            personaName: defaultPersona,
+                            memory: context.config.memory,
+                        });
+
+                        const plan = session.summaryPlan();
+                        if (plan === null) {
+                            return sendJson(response, 200, { summarized: false, memory: session.memoryState });
+                        }
+
+                        const summary = await session.summarize(modelConfig);
+                        return sendJson(response, 200, {
+                            summarized: summary !== null,
+                            memory: session.memoryState,
+                            usage: summary?.usage ?? null,
+                            usageSource: summary?.usageSource ?? null,
+                        });
                     }
 
                     const isTurn = (method === 'POST') && id !== undefined && sub !== undefined
@@ -524,6 +553,7 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
 
                         const session = await ChatSession.load(library, id, sub, {
                             personaName: body.personaName ?? defaultPersona,
+                            memory: context.config.memory,
                         });
 
                         // Quota is checked before the model is called, and the worst
@@ -573,6 +603,65 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                             });
                         };
 
+                        /**
+                         * Summarize when the history has outgrown the window.
+                         *
+                         * A summary is a real model call, so it goes through the same
+                         * authorize/settle path as a turn: leaving it unbilled would
+                         * be a hole in the quota, not a saving.
+                         */
+                        const runSummary = async (): Promise<{ summarized: boolean; upTo?: number; passes?: number } | void> => {
+                            const plan = session.summaryPlan();
+                            if (plan === null) {
+                                return;
+                            }
+
+                            const summaryRequestId = `${body.requestId ?? session.name}:summary:${plan.upTo}`;
+                            let summaryReservation: Reservation | null = null;
+
+                            if (user !== null && context.billing !== null) {
+                                try {
+                                    summaryReservation = context.billing.authorize(user.id, {
+                                        estimatedPromptTokens: plan.estimatedPromptTokens,
+                                        requestedMaxTokens: plan.maxTokens,
+                                        requestId: summaryRequestId,
+                                    });
+                                } catch {
+                                    // Out of quota for the summary: the turn itself already
+                                    // succeeded, so this is a skip rather than a failure.
+                                    return;
+                                }
+                            }
+
+                            try {
+                                const summary = await session.summarize(modelConfig);
+                                if (summary !== null && summaryReservation !== null && context.billing !== null) {
+                                    context.billing.settle(summaryReservation, {
+                                        requestId: summaryRequestId,
+                                        chatId: `${session.cardId}/${session.name}`,
+                                        model: summary.model,
+                                        promptTokens: summary.usage.promptTokens ?? 0,
+                                        completionTokens: summary.usage.completionTokens ?? 0,
+                                        usageSource: summary.usageSource,
+                                        streamed: false,
+                                    });
+                                } else if (summaryReservation !== null && context.billing !== null) {
+                                    context.billing.release(summaryReservation);
+                                }
+
+                                if (summary !== null) {
+                                    console.log(`[memory] summarized ${session.cardId}/${session.name} up to ${summary.upTo} (pass ${summary.passes})`);
+                                    return { summarized: true, upTo: summary.upTo, passes: summary.passes };
+                                }
+                            } catch (error) {
+                                if (summaryReservation !== null && context.billing !== null) {
+                                    context.billing.release(summaryReservation);
+                                }
+                                // Never fail a completed turn because its bookkeeping failed.
+                                console.warn(`[memory] summarization failed: ${error instanceof Error ? error.message : String(error)}`);
+                            }
+                        };
+
                         const release = (error: unknown): void => {
                             // An aborted or failed turn produced nothing the user can
                             // see, so it is not billed. The reservation still counted
@@ -589,7 +678,13 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                                     ? await session.regenerate(modelConfig, regenerateOptions)
                                     : await session.send(modelConfig, body.message as string, turnOptions);
                                 settle(result);
-                                return sendJson(response, 200, { cardId: session.cardId, name: session.name, ...result });
+                                const memory = await runSummary();
+                                return sendJson(response, 200, {
+                                    cardId: session.cardId,
+                                    name: session.name,
+                                    ...result,
+                                    ...(memory !== undefined ? { memory } : {}),
+                                });
                             } catch (error) {
                                 release(error);
                                 throw error;
@@ -618,6 +713,10 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                                 prompt: result.stats,
                                 requestId: result.requestId,
                             });
+
+                            // The client already has the whole reply, so the extra
+                            // summary call no longer delays anything it is waiting for.
+                            await runSummary();
                         } catch (error) {
                             release(error);
                             if ((error as { name?: string }).name === 'AbortError') {

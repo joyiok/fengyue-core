@@ -18,11 +18,21 @@ import type { CharacterCard } from '../cards/types.ts';
 import type { ChatMessage, ParsedChat } from '../chats/types.ts';
 import { defaultHeader } from '../chats/types.ts';
 import { createChatCompletion, streamChatCompletion } from '../gateway/openai.ts';
+import { estimateMessagesTokens } from '../prompt/estimate.ts';
 import type { CompletionUsage, ModelConfig, SamplingOverrides, UsageSource } from '../gateway/types.ts';
 import { ModelError } from '../gateway/types.ts';
 import type { Library } from '../library.ts';
 import type { Worldbook } from '../worldbooks/types.ts';
 import { assemblePrompt } from '../prompt/assemble.ts';
+import {
+    EMPTY_MEMORY,
+    applySummary,
+    buildSummaryRequest,
+    planSummaryUpTo,
+    readMemoryState,
+    type MemoryConfig,
+    type MemoryState,
+} from '../prompt/memory.ts';
 import type { PromptOptions, PromptStats } from '../prompt/types.ts';
 import { DEFAULT_HISTORY_TOKEN_BUDGET, DEFAULT_MAIN_PROMPT } from '../prompt/types.ts';
 import type { WorldInfoState } from '../prompt/worldinfo.ts';
@@ -35,6 +45,8 @@ export interface SessionOptions {
      * (`data.extensions.world`), which is how SillyTavern links them.
      */
     worldbookIds?: string[];
+    /** Rolling summary memory. */
+    memory?: MemoryConfig;
 }
 
 export interface CreateSessionOptions extends SessionOptions {
@@ -125,12 +137,14 @@ export class ChatSession {
     readonly card: CharacterCard;
     readonly personaName: string;
     readonly promptOptions: Omit<PromptOptions, 'personaName'>;
+    private readonly memoryOptions: MemoryConfig;
 
     private readonly library: Library;
     private readonly log: ChatMessage[];
     private metadata: Record<string, unknown>;
     private readonly worldbook: Worldbook | null;
     private worldInfoState: WorldInfoState;
+    private memory: MemoryState;
 
     private constructor(
         library: Library,
@@ -142,6 +156,7 @@ export class ChatSession {
         metadata: Record<string, unknown>,
         worldbook: Worldbook | null,
         worldInfoState: WorldInfoState,
+        memory: MemoryState,
     ) {
         this.library = library;
         this.cardId = cardId;
@@ -149,10 +164,12 @@ export class ChatSession {
         this.card = card;
         this.personaName = options.personaName;
         this.promptOptions = { ...defaultPromptOptions(), ...options.prompt };
+        this.memoryOptions = { ...options.memory };
         this.log = log;
         this.metadata = metadata;
         this.worldbook = worldbook;
         this.worldInfoState = worldInfoState;
+        this.memory = memory;
     }
 
     /** Which world books are active, for reporting and debugging. */
@@ -196,6 +213,7 @@ export class ChatSession {
             { story: { greetingIndex, personaName: options.personaName } },
             worldbook,
             {},
+            { ...EMPTY_MEMORY },
         );
 
         await session.save();
@@ -221,6 +239,7 @@ export class ChatSession {
             { ...chat.header.chat_metadata },
             worldbook,
             readWorldInfoState(chat.header.chat_metadata),
+            readMemoryState(chat.header.chat_metadata),
         );
     }
 
@@ -282,6 +301,7 @@ export class ChatSession {
             worldbook: this.worldbook,
             worldInfoState: this.worldInfoState,
             messageIndex: this.log.length,
+            memory: this.memory,
         });
 
         const request = {
@@ -312,10 +332,7 @@ export class ChatSession {
         // Sticky/cooldown state only advances when the turn actually lands, so a
         // failed call does not silently consume a sticky window.
         this.worldInfoState = assembled.nextWorldInfoState;
-        this.metadata = {
-            ...this.metadata,
-            story: { ...(this.metadata.story as Record<string, unknown> | undefined ?? {}), worldInfo: this.worldInfoState },
-        };
+        this.persistMetadata();
 
         this.log.push({ name: this.personaName, is_user: true, send_date: now, mes: userMessage });
         this.log.push({
@@ -345,6 +362,11 @@ export class ChatSession {
     /**
      * One turn. With `onDelta` the reply is streamed; the turn is still only
      * persisted once the stream has completed.
+     *
+     * This does NOT summarize. Memory maintenance is a second, separately billed
+     * model call, so the caller decides when to pay for it: the server authorizes
+     * it against the quota, and the CLI does it after the turn. Use
+     * `summaryPlan()` to ask whether one is due and `summarize()` to run it.
      */
     async send(config: ModelConfig, userMessage: string, options: TurnOptions = {}): Promise<SendResult> {
         return this.runTurn(config, userMessage, options);
@@ -392,6 +414,91 @@ export class ChatSession {
         }
     }
 
+    get memoryState(): MemoryState {
+        return { ...this.memory };
+    }
+
+    get memoryConfig(): MemoryConfig {
+        return { ...this.memoryOptions };
+    }
+
+    /**
+     * What a summarization pass would do, without doing it.
+     *
+     * Exposed so a caller can authorize the extra model call against the quota
+     * before it happens: a summary is a real call and must be billed like one.
+     */
+    summaryPlan(): { upTo: number; messages: number; estimatedPromptTokens: number; maxTokens: number } | null {
+        const upTo = planSummaryUpTo(this.memory, this.log.length, this.memoryOptions);
+        if (upTo === null) {
+            return null;
+        }
+
+        const chunk = this.log.slice(this.memory.upTo, upTo);
+        if (chunk.length === 0) {
+            return null;
+        }
+
+        const request = buildSummaryRequest({
+            previous: this.memory.text,
+            upTo,
+            messages: chunk,
+            config: this.memoryOptions,
+        });
+
+        return {
+            upTo,
+            messages: chunk.length,
+            estimatedPromptTokens: estimateMessagesTokens(request.messages),
+            maxTokens: request.maxTokens,
+        };
+    }
+
+    /**
+     * Merge the next chunk of history into the rolling summary and persist it.
+     * Returns null when there is nothing to summarize.
+     */
+    async summarize(config: ModelConfig): Promise<{
+        upTo: number;
+        passes: number;
+        text: string;
+        model: string;
+        usage: CompletionUsage;
+        usageSource: UsageSource;
+    } | null> {
+        const plan = this.summaryPlan();
+        if (plan === null) {
+            return null;
+        }
+
+        const chunk = this.log.slice(this.memory.upTo, plan.upTo);
+        const request = buildSummaryRequest({
+            previous: this.memory.text,
+            upTo: plan.upTo,
+            messages: chunk,
+            config: this.memoryOptions,
+        });
+
+        // Cheap and literal: a summary is a compression task, not a writing one.
+        const completion = await createChatCompletion(config, {
+            messages: request.messages,
+            overrides: { maxTokens: request.maxTokens, temperature: 0.3 },
+        });
+
+        this.memory = applySummary(this.memory, completion.content, plan.upTo, { model: completion.model });
+        this.persistMetadata();
+        await this.save();
+
+        return {
+            upTo: this.memory.upTo,
+            passes: this.memory.passes,
+            text: this.memory.text,
+            model: completion.model,
+            usage: completion.usage,
+            usageSource: completion.usageSource,
+        };
+    }
+
     /** Preview the prompt for the next message without calling the model. */
     preview(userMessage: string): ReturnType<typeof assemblePrompt> {
         return assemblePrompt({
@@ -402,7 +509,20 @@ export class ChatSession {
             worldbook: this.worldbook,
             worldInfoState: this.worldInfoState,
             messageIndex: this.log.length,
+            memory: this.memory,
         });
+    }
+
+    /** Write the current world info and memory state back into the chat metadata. */
+    private persistMetadata(): void {
+        this.metadata = {
+            ...this.metadata,
+            story: {
+                ...(this.metadata.story as Record<string, unknown> | undefined ?? {}),
+                worldInfo: this.worldInfoState,
+                memory: this.memory,
+            },
+        };
     }
 
     async save(): Promise<void> {

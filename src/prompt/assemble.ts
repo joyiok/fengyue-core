@@ -21,6 +21,7 @@ import type { CharacterCard } from '../cards/types.ts';
 import type { ChatMessage } from '../chats/types.ts';
 import { estimateMessagesTokens, estimateTokens } from './estimate.ts';
 import { parseExampleMessages, substituteNames, type ExampleNames } from './examples.ts';
+import { EMPTY_MEMORY, type MemoryState } from './memory.ts';
 import {
     DEFAULT_HISTORY_TOKEN_BUDGET,
     DEFAULT_MAIN_PROMPT,
@@ -44,6 +45,8 @@ export interface AssembleInput {
     worldInfoState?: WorldInfoState;
     /** How many messages the conversation has, for delay/sticky/cooldown. */
     messageIndex?: number;
+    /** Rolling summary that stands in for older messages. */
+    memory?: MemoryState | null;
 }
 
 export interface AssembleResult {
@@ -266,9 +269,15 @@ export function assemblePrompt(input: AssembleInput): AssembleResult {
     const includeExamples = options.includeExamples ?? true;
     const messageIndex = input.messageIndex ?? history.length;
 
+    // Messages already covered by the summary are not sent again: the summary
+    // replaces them rather than adding to them.
+    const memory = input.memory ?? EMPTY_MEMORY;
+    const summarizedUpTo = Math.min(Math.max(0, memory.upTo), history.length);
+    const liveHistory = summarizedUpTo > 0 ? history.slice(summarizedUpTo) : history;
+
     const scan = scanWorldInfo({
         worldbook: input.worldbook ?? null,
-        history,
+        history: liveHistory,
         userMessage,
         messageIndex,
         state: input.worldInfoState ?? {},
@@ -285,7 +294,7 @@ export function assemblePrompt(input: AssembleInput): AssembleResult {
         byTarget('before_definition').map((entry) => entry.content),
         byTarget('after_definition').map((entry) => entry.content),
     );
-    const selection = selectHistory(history, budget, maxMessages);
+    const selection = selectHistory(liveHistory, budget, maxMessages);
 
     const messages: PromptMessage[] = [{ role: 'system', content: definition.content }];
     const sections = [...definition.sections];
@@ -317,6 +326,12 @@ export function assemblePrompt(input: AssembleInput): AssembleResult {
     if (beforeHistory.length > 0) {
         messages.push(...beforeHistory);
         sections.push('world_info_before_history');
+    }
+
+    const summary = memory.text.trim();
+    if (summary !== '') {
+        messages.push({ role: 'system', content: `【前情摘要】\n${summary}` });
+        sections.push('memory');
     }
 
     if (selection.messages.length > 0) {
@@ -358,6 +373,15 @@ export function assemblePrompt(input: AssembleInput): AssembleResult {
             estimatedHistoryTokens: historyTokens,
             estimatedOverheadTokens: total - historyTokens,
             budgetExceeded: selection.droppedByBudget > 0,
+            memory: summary === ''
+                ? null
+                : {
+                    summarizedMessages: summarizedUpTo,
+                    passes: memory.passes,
+                    estimatedTokens: estimateTokens(summary),
+                    updatedAt: memory.updatedAt,
+                    preview: summary.slice(0, 80),
+                },
             worldInfo: scan.candidates === 0
                 ? null
                 : {
