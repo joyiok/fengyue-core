@@ -1,6 +1,6 @@
 # story-core
 
-自建「本项目」后端的核心层。目标形态见[《自建后端架构方案》](docs/product-backend-plan.md)。
+自建小说站后端的核心层。目标形态见[《自建后端架构方案》](docs/product-backend-plan.md)。
 
 - **M0 资产格式兼容层**：读写 SillyTavern 的角色卡、世界书、会话记录
 - **M1 单用户对话**：提示词引擎 + 模型网关 + 会话持久化
