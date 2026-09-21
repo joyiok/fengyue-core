@@ -67,6 +67,13 @@ cd deploy && docker compose up -d --build && ./check.sh
 
 `data/` 与 `.env` 是 gitignore 的，`git pull` 不会碰它们。数据库迁移在启动时自动跑。
 
+如果以 root 身份 `git pull`，新拉下来的文件会属于 root，而 `data/` 与 `caddy/` 属于
+`PUID:PGID`——两套属主混在一起正是让备份脚本读不到证书的那类坑。拉完顺手统一：
+
+```bash
+chown -R 1000:1000 /opt/story-core
+```
+
 ## 备份
 
 ```bash
