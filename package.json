@@ -1,0 +1,20 @@
+{
+  "name": "story-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "M0 asset layer: read and write SillyTavern character cards (V1/V2/V3), world books and chat logs, so a third-party backend can reuse the existing card ecosystem.",
+  "engines": {
+    "node": ">=22.6"
+  },
+  "scripts": {
+    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "server": "node --disable-warning=ExperimentalWarning src/server.ts",
+    "cli": "node --disable-warning=ExperimentalWarning src/cli.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.9.2"
+  }
+}

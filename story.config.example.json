@@ -1,0 +1,10 @@
+{
+    "model": {
+        "endpoint": "https://api.deepseek.com/v1/chat/completions",
+        "model": "deepseek-chat",
+        "apiKey": "sk-put-your-key-here-or-use-STORY_MODEL_API_KEY",
+        "temperature": 1,
+        "maxTokens": 1024,
+        "timeoutMs": 120000
+    }
+}

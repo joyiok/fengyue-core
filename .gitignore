@@ -1,0 +1,18 @@
+node_modules/
+
+# The real config holds an API key; only the example is committed.
+story.config.json
+
+# Local library when you run the server against ./library
+library/
+
+# Default runtime paths: the account database holds password hashes and the
+# usage ledger, and ./data holds per-user character cards and chats.
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+data/
+backups/
+
+*.log
+.DS_Store
