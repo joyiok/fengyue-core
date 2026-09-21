@@ -685,3 +685,43 @@ test('an unused import keeps the MockUsage type exported for callers', () => {
     const usage: MockUsage = { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 };
     assert.equal(usage.total_tokens, 3);
 });
+
+test('the root answers without a token and does not leak the library path', async () => {
+    const mock = await startMockModel();
+
+    try {
+        await withServer(mock.endpoint, async ({ base, register }) => {
+            // Reachable before anyone has an account: a probe or a browser should
+            // learn what this is instead of getting a bare 404 or a 401.
+            const anonymous = await fetch(`${base}/`);
+            assert.equal(anonymous.status, 200);
+            const landing = await anonymous.json() as {
+                name: string;
+                auth: string;
+                next?: string;
+                endpoints: Record<string, string>;
+            };
+            assert.equal(landing.name, 'story-core');
+            assert.equal(landing.auth, 'required');
+            assert.ok(landing.endpoints.turn?.includes('/messages'));
+            // Fresh instance: point the caller at the bootstrap step.
+            assert.match(landing.next ?? '', /register/);
+
+            // Once an account exists the bootstrap hint is gone.
+            await register('owner');
+            const after = await (await fetch(`${base}/`)).json() as { next?: string };
+            assert.equal(after.next, undefined);
+
+            // Health is public, but the absolute library path is local-only.
+            const health = await (await fetch(`${base}/health`)).json() as { ok: boolean; auth: boolean; root?: string };
+            assert.equal(health.ok, true);
+            assert.equal(health.auth, true);
+            assert.equal(health.root, undefined);
+
+            // The API itself is still behind auth.
+            assert.equal((await fetch(`${base}/api/v1/characters`)).status, 401);
+        });
+    } finally {
+        await mock.close();
+    }
+});

@@ -1,0 +1,16 @@
+[Unit]
+Description=Back up the Story Core deployment
+Documentation=file:/opt/story-core/deploy/README.md
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# Adjust WorkingDirectory, User and Group to match your checkout and its owner.
+WorkingDirectory=/opt/story-core/deploy
+ExecStart=/opt/story-core/deploy/backup.sh
+User=root
+Group=root
+# Rotation is read from .env (BACKUP_KEEP); override it here if you prefer.
+#Environment=BACKUP_KEEP=30
+Nice=10

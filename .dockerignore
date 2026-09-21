@@ -1,0 +1,12 @@
+node_modules
+.git
+.gitignore
+library
+data
+backups
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.log
+test
+deploy/README.md

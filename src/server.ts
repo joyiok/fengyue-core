@@ -177,6 +177,7 @@ function requestToken(request: http.IncomingMessage): string | null {
 }
 
 const PUBLIC_PATHS = new Set([
+    '/',
     '/health',
     '/api/v1/auth/register',
     '/api/v1/auth/login',
@@ -312,7 +313,36 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                 const library = await context.libraryFor(user?.id ?? context.config.localUserId);
 
                 if (url.pathname === '/health') {
-                    return sendJson(response, 200, { ok: true, root: library.root, auth: auth !== null });
+                    return sendJson(response, 200, {
+                        ok: true,
+                        auth: auth !== null,
+                        // The absolute library path is useful when running locally, but
+                        // a public probe has no business learning the filesystem layout.
+                        ...(auth === null ? { root: library.root } : {}),
+                    });
+                }
+
+                // There is no bundled UI: this is the API. Say so rather than
+                // answering a bare 404, which reads like a broken deployment.
+                if (url.pathname === '/') {
+                    return sendJson(response, 200, {
+                        name: 'story-core',
+                        description: 'Self-hosted backend for character cards, world books and chat.',
+                        auth: auth === null ? 'disabled' : 'required',
+                        endpoints: {
+                            health: 'GET /health',
+                            model: 'GET /api/v1/model',
+                            characters: 'GET|POST /api/v1/characters',
+                            worldbooks: 'GET /api/v1/worldbooks',
+                            chats: 'GET|POST /api/v1/chats',
+                            turn: 'POST /api/v1/chats/:cardId/:chatName/messages',
+                            register: 'POST /api/v1/auth/register',
+                            login: 'POST /api/v1/auth/login',
+                        },
+                        ...(auth !== null && auth.count() === 0
+                            ? { next: 'POST /api/v1/auth/register to create the first account (it becomes the admin)' }
+                            : {}),
+                    });
                 }
 
                 if (parts[0] !== 'api' || parts[1] !== 'v1') {

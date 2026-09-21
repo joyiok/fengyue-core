@@ -1,0 +1,29 @@
+{$APP_DOMAIN} {
+    # Caddy obtains the TLS certificate automatically when APP_DOMAIN is a real
+    # DNS name. For a private/IP-only test, set APP_DOMAIN=:80.
+    reverse_proxy story-core:8787 {
+        # Server-Sent Events must not sit in a buffer. Without this the streamed
+        # reply arrives in clumps, which reads as "the model is hanging".
+        flush_interval -1
+    }
+
+    # Only JSON is compressed, and that is deliberate: gzipping
+    # text/event-stream is the other classic way to break streaming.
+    encode zstd gzip {
+        match {
+            header Content-Type application/json*
+        }
+    }
+
+    header {
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        -Server
+    }
+
+    # No `log` block: the service already logs what matters (billing, memory
+    # passes, rejected credits) and Caddy's error-only default is enough here.
+
+    # Do not add `admin off`: the Compose healthcheck probes the local admin API
+    # on 127.0.0.1:2019, which also keeps that endpoint off the network.
+}

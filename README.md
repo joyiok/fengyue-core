@@ -292,6 +292,24 @@ DELETE /api/v1/characters/:id/publish          下架
 GET    /api/v1/chats/:cardId/:chatName         读一份会话（名字里的空格与中文要 URL 编码）
 ```
 
+`GET /` 与 `GET /health` 不需要 token：前者说明这个服务是什么、有哪些接口（还没有账号时会提示先去注册），后者是给探针用的。其余所有数据接口都要 Bearer token 或会话 cookie。
+
+## 部署
+
+单机 Docker Compose（一个应用容器 + 一个 Caddy 自动 HTTPS），全套在 `deploy/` 里：
+
+```bash
+git clone https://github.com/joyiok/story-core.git /opt/story-core
+cd /opt/story-core/deploy
+cp .env.example .env && chmod 600 .env && $EDITOR .env   # APP_DOMAIN + 模型三项
+mkdir -p data caddy/data caddy/config backups
+sudo chown -R 1000:1000 data caddy backups                # 容器以 PUID:PGID 运行
+docker compose up -d --build
+./check.sh
+```
+
+细节（首个账号、模型配置、更新、备份与恢复、已知取舍）见 [`deploy/README.md`](deploy/README.md)。两处和流式有关的配置值得单独记住：`reverse_proxy` 必须 `flush_interval -1`，并且**不能**压缩 `text/event-stream`，否则逐字输出会变成一坨。
+
 ## 验收标准
 
 > **M0**：能把酒馆的 `characters/*.png`、`worlds/*.json` 原样导入并列出；**导出的卡能被酒馆读回**。
@@ -379,6 +397,7 @@ src/
   library.ts      套在酒馆数据目录上的文件库
   server.ts       HTTP API（node:http，无框架）
   cli.ts          命令行
+deploy/           Docker Compose 部署：Dockerfile、Caddyfile、备份、systemd 单元、自检
 test/             单元测试 + 交叉验证（交叉验证需环境变量，默认跳过）
 scripts/          与酒馆的互操作验收脚本
 ```

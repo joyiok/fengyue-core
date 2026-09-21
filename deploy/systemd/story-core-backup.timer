@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily Story Core backup
+
+[Timer]
+OnCalendar=daily
+# Spread the load, and run a missed backup after the machine was powered off.
+RandomizedDelaySec=1h
+Persistent=true
+Unit=story-core-backup.service
+
+[Install]
+WantedBy=timers.target

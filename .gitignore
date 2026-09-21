@@ -14,5 +14,12 @@ library/
 data/
 backups/
 
+# A deployment keeps its state next to the compose file (deploy/data, deploy/caddy),
+# and .env there holds the model API key.
+deploy/.env
+deploy/data/
+deploy/backups/
+deploy/caddy/
+
 *.log
 .DS_Store
