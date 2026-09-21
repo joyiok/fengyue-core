@@ -74,6 +74,18 @@ cd deploy && docker compose up -d --build && ./check.sh
 
 `data/` 与 `.env` 是 gitignore 的，`git pull` 不会碰它们。数据库迁移在启动时自动跑。
 
+**改了 `Caddyfile` 就必须重建 caddy 容器**：它是以单文件 bind mount 挂进去的，挂的是
+inode；`git pull` 会用新文件覆盖旧文件，容器里那份就停在旧 inode 上，`docker compose
+up -d` 也看不出配置变了（它比较的是 compose 配置，不是挂载文件的内容）。现象是网页照常
+打开但走的还是旧路由。所以 Caddyfile 有变更时多走一步：
+
+```bash
+cd deploy && docker compose up -d --no-deps --force-recreate caddy
+docker compose exec caddy md5sum /etc/caddy/Caddyfile && md5sum Caddyfile   # 两个要一样
+```
+
+`caddy reload` 解决不了这个——它重读的是容器里那份旧文件。
+
 如果以 root 身份 `git pull`，新拉下来的文件会属于 root，而 `data/` 与 `caddy/` 属于
 `PUID:PGID`——两套属主混在一起正是让备份脚本读不到证书的那类坑。拉完顺手统一：
 
@@ -124,3 +136,4 @@ docker compose up -d
 - **`/api/*` 不经过 web 容器**。生产里网页客户端根本收不到接口请求，它自带的那个
   代理路由只是 `next dev` 用的。
 - **应用容器是只读根文件系统**，只有 `data/`、`/tmp` 可写；`web` 同理，只多 `/app/.next/cache`（Next 的构建缓存）；Caddy 只有 `caddy/`。
+- **`check.sh` 不注册账号。** 实例里一个账号都没有时，“第一个注册的就是管理员”这一步必须由你自己做，脚本只验路由、页面和健康。

@@ -96,10 +96,11 @@ case "$CODE" in
 esac
 
 # The API must be routed to story-core and not to the web client — otherwise
-# every page loads and nothing works. `/api/v1/model` answers 200 whether or not
-# a model is configured, so anything that is not JSON here is a routing bug.
+# every page loads and nothing works. This route needs a token, so a probe
+# without one getting *story-core's own* JSON back is the correct answer: it
+# proves the request was answered by the API instead of with a page.
 API_BODY="$(curl -sS --max-time 15 "$URL/api/v1/model" 2>/dev/null || true)"
-if printf '%s' "$API_BODY" | grep -Eq '"configured"'; then
+if printf '%s' "$API_BODY" | grep -Eq '"configured"|"authentication_required"'; then
   ok "reverse proxy routes /api to the application"
 else
   die "the API is not reachable through $URL (got: ${API_BODY:-nothing})"
