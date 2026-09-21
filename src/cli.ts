@@ -12,7 +12,7 @@
  *   node src/cli.ts say <id> <chat> <message>    continue an existing chat
  *
  * The library root comes from --root or STORY_LIBRARY_ROOT (default ./library).
- * Point it at a SillyTavern user directory (e.g. ../../story-tavern/data/default-user)
+ * Point it at a SillyTavern user directory (e.g. ..//path/to/sillytavern/data/default-user)
  * to work on an existing library directly.
  *
  * Model settings come from story.config.json or the STORY_MODEL_* variables;

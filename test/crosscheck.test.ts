@@ -2,7 +2,7 @@
  * Cross-check against a real SillyTavern library. Opt-in, because the fixtures
  * are somebody else's files and must not be committed here:
  *
- *   SILLYTAVERN_LIBRARY=../../story-tavern/data/default-user npm test
+ *   SILLYTAVERN_LIBRARY=..//path/to/sillytavern/data/default-user npm test
  *
  * This proves the two directions that matter for M0:
  *   - we can read what SillyTavern wrote;

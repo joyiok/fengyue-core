@@ -1,6 +1,6 @@
 # story-core
 
-自建「本项目」后端的核心层。目标形态见[《自建后端架构方案》](../story-tavern/docs/product-backend-plan.md)。
+自建「本项目」后端的核心层。目标形态见[《自建后端架构方案》](docs/product-backend-plan.md)。
 
 - **M0 资产格式兼容层**：读写 SillyTavern 的角色卡、世界书、会话记录
 - **M1 单用户对话**：提示词引擎 + 模型网关 + 会话持久化
@@ -152,7 +152,7 @@ npm test             # 单元测试（69 项）
 npm run typecheck
 
 # 指向酒馆的数据目录直接操作
-export STORY_LIBRARY_ROOT=../story-tavern/data/default-user
+export STORY_LIBRARY_ROOT=/path/to/sillytavern/data/default-user
 node src/cli.ts list
 node src/cli.ts worldbooks
 node src/cli.ts preview linzhao "今天有点累"     # 只看提示词，不调模型
@@ -179,7 +179,7 @@ node src/cli.ts model                                 # 显示当前配置（密
 HTTP（默认只监听回环）：
 
 ```bash
-STORY_LIBRARY_ROOT=../story-tavern/data/default-user node src/server.ts --port 8787
+STORY_LIBRARY_ROOT=/path/to/sillytavern/data/default-user node src/server.ts --port 8787
 
 curl -s localhost:8787/api/v1/model
 curl -s -X POST localhost:8787/api/v1/chats \
@@ -204,9 +204,11 @@ curl -s -X POST localhost:8787/api/v1/chats/linzhao/2026-09-21_22-09-41/messages
 
 M0 两个方向都有可执行验证：
 
+指向一份真实的酒馆数据目录即可（本机示例：`../story-tavern/data/default-user`）。
+
 ```bash
 # 方向一：酒馆写的，我们能读
-SILLYTAVERN_LIBRARY=../story-tavern/data/default-user npm test
+SILLYTAVERN_LIBRARY=/path/to/sillytavern/data/default-user npm test
 
 # 方向二：我们写的，酒馆能读（需要 story-tavern 的酒馆容器在运行）
 ./scripts/verify-with-sillytavern.sh
