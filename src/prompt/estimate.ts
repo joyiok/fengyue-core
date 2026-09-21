@@ -17,8 +17,9 @@ const ASCII_CHARS_PER_TOKEN = 4;
 const MESSAGE_OVERHEAD_TOKENS = 4;
 
 function isWide(codePoint: number): boolean {
-    // CJK radicals and everything above, plus the common fullwidth/punctuation
-    // blocks. Anything non-ASCII is counted as wide, which errs on the safe side.
+    // CJK radicals and everything above (CJK, kana, hangul, fullwidth forms and
+    // punctuation). Latin-1 letters with accents sit below this and are counted
+    // as narrow, which is close enough for Latin scripts.
     return codePoint > 0x2e7f;
 }
 
