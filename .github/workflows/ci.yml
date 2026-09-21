@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Typecheck and tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          # Node 22 runs TypeScript directly (type stripping) and ships
+          # node:sqlite, which is what keeps this project dependency-free.
+          node-version: '22'
+          cache: npm
+
+      - name: Install dev tooling
+        run: |
+          node --version
+          npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Tests
+        run: npm test
+
+  scripts:
+    name: Shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check shell syntax
+        run: bash -n scripts/*.sh
+
+      - name: Run ShellCheck
+        run: shellcheck --severity=style scripts/*.sh
+
+  interop:
+    name: Interop with real SillyTavern
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # The input format is owned by another project, so the only meaningful test
+      # of it is against that project. If the image cannot be fetched the check is
+      # skipped rather than failed: a registry outage is not a regression here.
+      - name: Pull the SillyTavern image
+        id: image
+        run: |
+          if docker pull ghcr.io/sillytavern/sillytavern:latest; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::could not pull the SillyTavern image, skipping the interop check"
+          fi
+
+      - name: Start SillyTavern
+        if: steps.image.outputs.available == 'true'
+        run: |
+          docker run -d --name st ghcr.io/sillytavern/sillytavern:latest
+          for _ in $(seq 1 30); do
+            if [ "$(docker inspect -f '{{.State.Running}}' st)" = "true" ]; then
+              break
+            fi
+            sleep 2
+          done
+          docker inspect -f 'running={{.State.Running}}' st
+
+      - name: Write a card with this project and read it back with SillyTavern
+        if: steps.image.outputs.available == 'true'
+        run: |
+          mkdir -p /tmp/lib
+          printf '%s' '{"spec":"chara_card_v2","data":{"name":"CI Interop","description":"written by story-core, parsed by SillyTavern","first_mes":"hi"}}' > /tmp/card.json
+
+          STORY_LIBRARY_ROOT=/tmp/lib node --disable-warning=ExperimentalWarning \
+            src/cli.ts import /tmp/card.json
+
+          ./scripts/verify-with-sillytavern.sh --library /tmp/lib --container st
+
+      - name: Container logs on failure
+        if: failure()
+        run: docker logs st 2>&1 | tail -50 || true
