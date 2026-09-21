@@ -52,6 +52,20 @@ jobs:
       - name: Run ShellCheck
         run: shellcheck --severity=style --external-sources scripts/*.sh deploy/*.sh
 
+      - name: Shell scripts must be executable
+        # git only tracks the executable bit, so a script created without +x
+        # arrives non-executable on a fresh clone — and the systemd unit calls
+        # deploy/backup.sh directly, so that failure only shows up in production.
+        run: |
+          status=0
+          for file in scripts/*.sh deploy/*.sh; do
+            if [ ! -x "$file" ]; then
+              echo "::error file=$file::$file is not executable"
+              status=1
+            fi
+          done
+          exit $status
+
   deploy:
     name: Deployment artifacts
     runs-on: ubuntu-latest
