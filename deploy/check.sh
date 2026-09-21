@@ -43,14 +43,17 @@ fi
 
 # ------------------------------------------------------------------ application
 HEALTH="$(curl -sS --max-time 10 "http://127.0.0.1:${PROBE_PORT}/health" 2>/dev/null || true)"
-case "$HEALTH" in
-  *'"ok":true'*) ok "health route answered on 127.0.0.1:${PROBE_PORT}" ;;
-  *) die "health route did not answer on 127.0.0.1:${PROBE_PORT} (got: ${HEALTH:-nothing})" ;;
-esac
+# Whitespace-tolerant: the API pretty-prints its JSON, and an assertion that
+# depends on the exact spacing is a false negative waiting to happen.
+if printf '%s' "$HEALTH" | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true'; then
+  ok "health route answered on 127.0.0.1:${PROBE_PORT}"
+else
+  die "health route did not answer on 127.0.0.1:${PROBE_PORT} (got: ${HEALTH:-nothing})"
+fi
 
 # The model gateway is optional at this stage: an unconfigured instance still
 # serves accounts, cards and the market, it just cannot answer a turn.
-if curl -sS --max-time 10 "http://127.0.0.1:${PROBE_PORT}/" 2>/dev/null | grep -q '"name": "story-core"'; then
+if curl -sS --max-time 10 "http://127.0.0.1:${PROBE_PORT}/" 2>/dev/null | grep -Eq '"name"[[:space:]]*:[[:space:]]*"story-core"'; then
   ok "root route identifies the service"
 else
   warn "root route did not return the expected landing payload"

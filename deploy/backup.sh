@@ -31,9 +31,11 @@ mkdir -p backups
 chmod 700 backups
 
 # Write to .partial first so an interrupted run can never leave a truncated file
-# that looks like a valid archive.
-tar --create --gzip --file "$PARTIAL" --exclude='*.partial' data
-[ -f .env ] && tar --append --file "$PARTIAL" .env
+# that looks like a valid archive. Both entries go in one invocation: a
+# gzip-compressed archive cannot be appended to afterwards.
+entries=(data)
+[ -f .env ] && entries+=(.env)
+tar --create --gzip --file "$PARTIAL" --exclude='*.partial' "${entries[@]}"
 
 chmod 600 "$PARTIAL"
 mv "$PARTIAL" "$ARCHIVE"

@@ -87,6 +87,35 @@ jobs:
             test -r /app/src/server.ts || { echo "sources are not readable by the runtime user"; exit 1; }
           '
 
+      - name: Actually run the backup script
+        # The script is only meaningful if it produces a valid, verifiable
+        # archive: `bash -n` and ShellCheck cannot see a tar invocation that is
+        # wrong (gzip archives cannot be appended to, for one).
+        #
+        # Run from the deployment directory, which is how the README and the
+        # systemd unit invoke it: the checksum file records paths relative to it.
+        working-directory: deploy
+        run: |
+          cp .env.example .env
+          mkdir -p data/chats
+          printf '{}\n' > data/story.sqlite
+          ./backup.sh
+
+          archive="$(ls -1t backups/story-core-*.tar.gz | head -n1)"
+          test -s "$archive"
+          sha256sum --check "${archive}.sha256"
+          tar -tzf "$archive" >/dev/null
+          tar -tzf "$archive" | grep -qx 'data/story.sqlite'
+          tar -tzf "$archive" | grep -qx '.env'
+          test -z "$(find backups -name '*.partial' -print -quit)"
+
+      - name: Rotation keeps the requested number of archives
+        working-directory: deploy
+        run: |
+          BACKUP_KEEP=1 ./backup.sh
+          BACKUP_KEEP=1 ./backup.sh
+          test "$(find backups -maxdepth 1 -name 'story-core-*.tar.gz' | wc -l)" -eq 1
+
       - name: Validate the Compose file
         run: |
           cp deploy/.env.example deploy/.env
