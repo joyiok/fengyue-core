@@ -136,6 +136,14 @@ function statusForError(error: unknown): number {
         return 400;
     }
 
+    if (message.startsWith('no message at index')) {
+        return 404;
+    }
+
+    if (message.includes('must not be empty') || message.includes('must be a PNG')) {
+        return 400;
+    }
+
     if (message.startsWith('request body exceeds')) {
         return 413;
     }
@@ -333,9 +341,15 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                             health: 'GET /health',
                             model: 'GET /api/v1/model',
                             characters: 'GET|POST /api/v1/characters',
-                            worldbooks: 'GET /api/v1/worldbooks',
+                            character: 'GET|PUT|DELETE /api/v1/characters/:id',
+                            worldbooks: 'GET|PUT|DELETE /api/v1/worldbooks/:id',
                             chats: 'GET|POST /api/v1/chats',
+                            chat: 'GET|DELETE /api/v1/chats/:cardId/:chatName',
                             turn: 'POST /api/v1/chats/:cardId/:chatName/messages',
+                            regenerate: 'POST /api/v1/chats/:cardId/:chatName/regenerate',
+                            deleteMessage: 'DELETE /api/v1/chats/:cardId/:chatName/messages/:index',
+                            market: 'GET /api/v1/market',
+                            rankings: 'GET /api/v1/rankings',
                             register: 'POST /api/v1/auth/register',
                             login: 'POST /api/v1/auth/login',
                         },
@@ -580,6 +594,7 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                 // spaces and CJK), so every segment is decoded before use.
                 const sub = decodeSegment(parts[4]);
                 const subId = decodeSegment(parts[5]);
+                const subSub = decodeSegment(parts[6]);
 
                 // ------------------------------------------------------ market
 
@@ -611,6 +626,29 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                                 ...(user !== null ? { requesterId: user.id } : {}),
                             }),
                         });
+                    }
+
+                    if (method === 'GET' && ownerId !== undefined && characterId !== undefined && subId === 'card.png') {
+                        // Importing a published card copies the whole PNG anyway, so
+                        // its avatar can be served to a market grid. An unpublished
+                        // one stays private, avatar included.
+                        if (!market.isPublic(ownerId, characterId)) {
+                            return sendJson(response, 404, { error: 'not_published', message: 'no such published character' });
+                        }
+
+                        const source = await context.libraryFor(ownerId);
+                        return sendBuffer(response, 200, 'image/png', await source.readCardPng(characterId));
+                    }
+
+                    if (method === 'GET' && ownerId !== undefined && characterId !== undefined && subId === 'card.json') {
+                        // The published card itself. Importing already copies the
+                        // whole PNG, so this reveals nothing the listing does not.
+                        if (!market.isPublic(ownerId, characterId)) {
+                            return sendJson(response, 404, { error: 'not_published', message: 'no such published character' });
+                        }
+
+                        const source = await context.libraryFor(ownerId);
+                        return sendJson(response, 200, await source.getCard(characterId));
                     }
 
                     if (method === 'GET' && ownerId !== undefined && characterId !== undefined && subId === undefined) {
@@ -708,6 +746,29 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                         return sendJson(response, 200, { id, card: await library.getCard(id) });
                     }
 
+                    // Edit in place. The id is the file name and never changes, so
+                    // existing chats and market listings keep pointing at this card.
+                    if (method === 'PUT' && id !== undefined && sub === undefined) {
+                        const body = JSON.parse((await readBody(request)).toString('utf8') || '{}');
+                        return sendJson(response, 200, await library.updateCard(id, body));
+                    }
+
+                    // Replace the avatar without touching a single field: the
+                    // uploaded image becomes the base of the re-encoded card.
+                    if (method === 'PUT' && id !== undefined && sub === 'avatar') {
+                        return sendJson(response, 200, {
+                            id,
+                            fileName: `${id}.png`,
+                            summary: await library.replaceCardAvatar(id, await readBody(request)),
+                        });
+                    }
+
+                    // A conversation without its card has no prompt to send, so it
+                    // goes too. Deleting one conversation alone is a chats route.
+                    if (method === 'DELETE' && id !== undefined && sub === undefined) {
+                        return sendJson(response, 200, { id, deleted: true, ...await library.deleteCharacter(id) });
+                    }
+
                     if (method === 'GET' && id !== undefined && sub === 'card.png') {
                         return sendBuffer(response, 200, 'image/png', await library.exportCardPng(id));
                     }
@@ -761,6 +822,20 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                     if (method === 'GET' && id !== undefined) {
                         return sendJson(response, 200, { id, worldbook: await library.getWorldbook(id) });
                     }
+
+                    // Write a book (create or replace). `library.putWorldbook`
+                    // normalises first, so a partial entry list from an editor still
+                    // produces a complete file.
+                    if (method === 'PUT' && id !== undefined) {
+                        const body = JSON.parse((await readBody(request)).toString('utf8') || '{}');
+                        await library.putWorldbook(id, body);
+                        return sendJson(response, 200, { id, worldbook: await library.getWorldbook(id) });
+                    }
+
+                    if (method === 'DELETE' && id !== undefined) {
+                        await library.deleteWorldbook(id);
+                        return sendJson(response, 200, { id, deleted: true });
+                    }
                 }
 
                 if (resource === 'chats') {
@@ -805,8 +880,55 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                     // Read one chat: `/chats/<card>/<chat>`. The name lives in `sub`;
                     // `subId` is only used by the sub-routes (messages, regenerate,
                     // summarize), so requiring it here made this route unreachable.
+                    // Read one chat. Long logs can be paged with `?offset=&limit=`;
+                    // with neither, the whole log comes back, which is what a client
+                    // restoring a session after a refresh wants.
                     if (method === 'GET' && id !== undefined && sub !== undefined && subId === undefined) {
-                        return sendJson(response, 200, { character: id, name: sub, chat: await library.getChat(id, sub) });
+                        const chat = await library.getChat(id, sub);
+                        const total = chat.messages.length;
+                        const offset = Math.max(0, Math.trunc(Number(url.searchParams.get('offset') ?? 0)) || 0);
+                        const limitParam = url.searchParams.get('limit');
+                        const limit = limitParam === null
+                            ? Math.max(0, total - offset)
+                            : Math.max(0, Math.trunc(Number(limitParam)) || 0);
+
+                        return sendJson(response, 200, {
+                            character: id,
+                            name: sub,
+                            chat: { ...chat, messages: chat.messages.slice(offset, offset + limit) },
+                            total,
+                        });
+                    }
+
+                    if (method === 'DELETE' && id !== undefined && sub !== undefined && subId === undefined) {
+                        await library.deleteChat(id, sub);
+                        return sendJson(response, 200, { character: id, name: sub, deleted: true });
+                    }
+
+                    // Delete one message. Rewording is `regenerate` with a `message`
+                    // override rather than a separate PATCH: to the user those are one
+                    // action ("make it say something else"), and the replaced reply is
+                    // kept in `previousReplies` instead of vanishing.
+                    if (method === 'DELETE' && id !== undefined && sub !== undefined
+                        && subId === 'messages' && subSub !== undefined) {
+                        const index = Number(subSub);
+                        if (!Number.isInteger(index) || index < 0) {
+                            return sendJson(response, 400, { error: 'message index must be a non-negative integer' });
+                        }
+
+                        const session = await ChatSession.load(library, id, sub, {
+                            personaName: defaultPersona,
+                            memory: context.config.memory,
+                        });
+                        const removed = session.deleteMessage(index);
+                        await session.save();
+
+                        return sendJson(response, 200, {
+                            character: id,
+                            name: sub,
+                            removed: { name: removed.name, isUser: removed.is_user },
+                            messages: session.messages.length,
+                        });
                     }
 
                     // Force a summarization pass (same billing path as the automatic one).

@@ -9,11 +9,11 @@
  * SillyTavern data directory and everything is already there, and anything this
  * layer writes can be read back by SillyTavern.
  */
-import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { cardFromJson, cardFromPng, cardToPng, summarizeCard, type CardSummary } from './cards/io.ts';
-import type { CharacterCard } from './cards/types.ts';
+import { normalizeCard, type CharacterCard, type CharacterCardData } from './cards/types.ts';
 import { parseChatJsonl, serializeChatJsonl, summarizeChat, type ChatSummary } from './chats/jsonl.ts';
 import type { ParsedChat } from './chats/types.ts';
 import { isPng } from './png/chunks.ts';
@@ -191,6 +191,89 @@ export class Library {
         return cardToPng(cardFromPng(original), original);
     }
 
+    /**
+     * Edit a card in place.
+     *
+     * The patch is merged into the existing `data` rather than replacing it, so a
+     * form can send only the fields it shows (or the whole `data` block) without
+     * silently dropping the rest of the card. The file name — and therefore the
+     * id — never changes: chats and the market refer to it.
+     *
+     * The original PNG is reused as the base image, so an edit never loses the
+     * avatar. That is the difference between an edit and a re-import.
+     */
+    async updateCard(
+        id: string,
+        patch: unknown,
+    ): Promise<{ id: string; fileName: string; summary: CardSummary }> {
+        const original = await this.readCardPng(id);
+        const existing = cardFromPng(original);
+        const overlay = asRecord(patch);
+
+        // Both `{data: {...}}` (a card-shaped body) and a flat `{description: ...}`
+        // are what an editor naturally sends.
+        const nested = overlay.data;
+        const fields = (nested !== null && typeof nested === 'object' && !Array.isArray(nested))
+            ? nested as Record<string, unknown>
+            : overlay;
+        const data = { ...existing.data, ...fields } as CharacterCardData;
+
+        if (typeof data.name !== 'string' || data.name.trim() === '') {
+            throw new Error('card name must not be empty');
+        }
+
+        const card = normalizeCard({
+            spec: existing.spec,
+            spec_version: existing.spec_version,
+            data,
+        });
+
+        const fileName = `${assertSafeId(id)}.png`;
+        const png = cardToPng(card, original);
+        await writeFile(safeJoin(this.charactersDir, fileName), png);
+
+        return { id, fileName, summary: summarizeCard(id, card, png) };
+    }
+
+    /**
+     * Swap the avatar, keeping every field of the card.
+     *
+     * The uploaded image is a plain PNG (a screenshot, a picture from anywhere),
+     * and `cardToPng` re-encodes it with the card chunks added — which is the
+     * whole reason the PNG writer takes a base image.
+     */
+    async replaceCardAvatar(id: string, image: Buffer): Promise<CardSummary> {
+        if (!isPng(image)) {
+            throw new Error('avatar must be a PNG');
+        }
+
+        const card = await this.getCard(id);
+        const png = cardToPng(card, image);
+        await writeFile(this.cardPath(id), png);
+        return summarizeCard(id, card, png);
+    }
+
+    /**
+     * Remove a character card, and with it the conversations that can no longer
+     * be opened: a chat without its card has no prompt to send. Removing one
+     * conversation on its own is `deleteChat`.
+     */
+    async deleteCharacter(id: string): Promise<{ chatsRemoved: number }> {
+        await unlink(this.cardPath(id));
+
+        const dir = safeJoin(this.chatsDir, assertSafeId(id));
+        let chatsRemoved = 0;
+
+        try {
+            chatsRemoved = (await readdir(dir)).length;
+            await rm(dir, { recursive: true, force: true });
+        } catch {
+            // No chat folder: nothing else to remove.
+        }
+
+        return { chatsRemoved };
+    }
+
     // ----------------------------------------------------------- world books
 
     async listWorldbooks(): Promise<WorldbookSummary[]> {
@@ -223,11 +306,6 @@ export class Library {
         return normalizeWorldbook(JSON.parse(text));
     }
 
-    /**
-     * Write a world book. The input is normalised first, so callers can hand over
-     * partial entries (which is what every importer naturally has) and still get
-     * a complete file on disk.
-     */
     /**
      * Load the world books that apply to a character and tag every entry with its
      * book name.
@@ -267,9 +345,18 @@ export class Library {
         return found ? { id: requested.join(', '), entries } : null;
     }
 
+    /**
+     * Write a world book. The input is normalised first, so callers can hand over
+     * partial entries (which is what every importer naturally has) and still get
+     * a complete file on disk.
+     */
     async putWorldbook(id: string, book: unknown): Promise<void> {
         await this.ensureDirs();
         await writeFile(safeJoin(this.worldsDir, `${assertSafeId(id)}.json`), worldbookToJson(normalizeWorldbook(book)), 'utf8');
+    }
+
+    async deleteWorldbook(id: string): Promise<void> {
+        await unlink(safeJoin(this.worldsDir, `${assertSafeId(id)}.json`));
     }
 
     // ----------------------------------------------------------------- chats
@@ -320,4 +407,14 @@ export class Library {
         await mkdir(dir, { recursive: true });
         await writeFile(safeJoin(dir, `${assertSafeId(name)}.jsonl`), serializeChatJsonl(chat), 'utf8');
     }
+
+    async deleteChat(character: string, name: string): Promise<void> {
+        await unlink(safeJoin(this.chatsDir, assertSafeId(character), `${assertSafeId(name)}.jsonl`));
+    }
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+    return value !== null && typeof value === 'object' && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : {};
 }

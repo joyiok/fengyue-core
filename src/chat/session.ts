@@ -418,6 +418,31 @@ export class ChatSession {
         return { ...this.memory };
     }
 
+    /**
+     * Remove one message from the log.
+     *
+     * Editing is not a separate operation: change the user message and use
+     * `regenerate` with `userMessageOverride`, which keeps the replaced reply in
+     * `previousReplies` instead of dropping it on the floor.
+     *
+     * The rolling summary can only stand in for messages that still exist, so its
+     * watermark is clamped to the new log length.
+     */
+    deleteMessage(index: number): ChatMessage {
+        if (!Number.isInteger(index) || index < 0 || index >= this.log.length) {
+            throw new Error(`no message at index ${index}`);
+        }
+
+        const removed = this.log.splice(index, 1)[0] as ChatMessage;
+
+        if (this.memory.upTo > this.log.length) {
+            this.memory = { ...this.memory, upTo: this.log.length };
+        }
+
+        this.persistMetadata();
+        return removed;
+    }
+
     get memoryConfig(): MemoryConfig {
         return { ...this.memoryOptions };
     }
