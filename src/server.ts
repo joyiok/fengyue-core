@@ -1219,7 +1219,7 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                         const card = await library.getCard(body.cardId as string);
                         const modState = body.modIds === undefined || context.mods === null || context.mods === undefined
                             ? null
-                            : context.mods.sessionState(card, body.modIds, user?.id ?? context.config.localUserId);
+                            : context.mods.sessionState(card, body.cardId as string, body.modIds, user?.id ?? context.config.localUserId);
 
                         const created = await ChatSession.create(library, {
                             cardId: body.cardId,

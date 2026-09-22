@@ -279,7 +279,7 @@ export class ModsService {
      * This is the enforcement point. Hiding a button in the UI is not a
      * boundary; anything that reaches `POST /chats` goes through here.
      */
-    resolve(card: CharacterCard, modIds: string[], libraryOwnerId: string): ModPayload[] {
+    resolve(card: CharacterCard, cardId: string, modIds: string[], libraryOwnerId: string): ModPayload[] {
         const rules = cardModRules(card, libraryOwnerId);
         const payloads: ModPayload[] = [];
 
@@ -289,11 +289,11 @@ export class ModsService {
                 throw new ModError('not_found', `no such mod: ${id}`, 404);
             }
 
-            if (mod.scope === 'dedicated' && mod.boundCharacterId !== undefined && mod.boundCharacterId !== null) {
-                // A dedicated mod is only selectable inside its one work.
-                if (mod.boundCharacterId !== this.#cardKey(card)) {
-                    throw new ModError('policy', `「${mod.name}」是别的作品的专用 Mod`, 403);
-                }
+            // A dedicated mod is only selectable inside its one work, and the
+            // work is named by its *id* — the file name — not by `card.data.name`,
+            // which is a display string an author can change at will.
+            if (mod.scope === 'dedicated' && mod.boundCharacterId !== cardId) {
+                throw new ModError('policy', `「${mod.name}」是别的作品的专用 Mod`, 403);
             }
 
             const mine = mod.ownerId === rules.authorId;
@@ -319,7 +319,7 @@ export class ModsService {
     }
 
     /** Everything a session has to remember about what it loaded. */
-    sessionState(card: CharacterCard, modIds: string[], libraryOwnerId: string): {
+    sessionState(card: CharacterCard, cardId: string, modIds: string[], libraryOwnerId: string): {
         ids: string[];
         payloads: ModPayload[];
         entries: Record<string, WorldbookEntry>;
@@ -330,7 +330,7 @@ export class ModsService {
         const loaded = modIds.map((id) => this.require(id));
 
         // `resolve` is what enforces; this reuses it so the two cannot drift.
-        const payloads = this.resolve(card, modIds, libraryOwnerId);
+        const payloads = this.resolve(card, cardId, modIds, libraryOwnerId);
 
         // A memory preset is policy, so the last one loaded wins — and it is
         // visible, because turning memory on means this session starts paying
@@ -365,11 +365,6 @@ export class ModsService {
         for (const id of ids) {
             this.#db.prepare('UPDATE mods SET uses = uses + 1 WHERE id = ?').run(id);
         }
-    }
-
-    #cardKey(card: CharacterCard): string {
-        const story = (card.data.extensions?.story ?? {}) as { cardKey?: unknown };
-        return typeof story.cardKey === 'string' ? story.cardKey : String(card.data.name ?? '');
     }
 
     #assertOwner(mod: Mod, ownerId: string): void {

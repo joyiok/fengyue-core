@@ -276,6 +276,15 @@ const MIGRATIONS: Migration[] = [
             // What a reader does not want to see: whole tags, or words that must
             // not appear in a reply. Kept per user rather than global, because
             // "小众XP" is taste, not policy.
+            // The memory preset was in the design before it was in the schema.
+            // Separate migration rather than editing v4: that one has already
+            // run on a deployed database and migrations are not rewritten.
+            `ALTER TABLE mods ADD COLUMN memory TEXT NOT NULL DEFAULT ''`,
+        ],
+    },
+    {
+        version: 6,
+        statements: [
             `CREATE TABLE IF NOT EXISTS user_blocks (
                 user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 kind    TEXT NOT NULL,
