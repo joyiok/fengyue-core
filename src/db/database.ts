@@ -12,12 +12,36 @@
  */
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 
+/**
+ * A migration step is SQL, or code — because "add this column if it is missing"
+ * cannot be said in SQLite DDL. `ALTER TABLE ... ADD COLUMN` has no
+ * `IF NOT EXISTS`, and a plain statement would fail on a database that already
+ * has it.
+ *
+ * That is the whole reason this type is not `string[]`: a repair has to be
+ * expressible, or it gets written as a plain ALTER and breaks the other half of
+ * the databases it was meant to fix.
+ */
+type MigrationStep = string | ((db: DatabaseSync) => void);
+
 interface Migration {
     version: number;
-    statements: string[];
+    statements: MigrationStep[];
 }
 
-const MIGRATIONS: Migration[] = [
+/** The one conditional thing we ever need from SQLite DDL. */
+function addColumnIfMissing(table: string, column: string, definition: string): MigrationStep {
+    return (db) => {
+        const columns = (db.prepare(`PRAGMA table_info(${table})`).all() as unknown as { name: string }[])
+            .map((row) => row.name);
+
+        if (!columns.includes(column)) {
+            db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+        }
+    };
+}
+
+export const MIGRATIONS: Migration[] = [
     {
         version: 1,
         statements: [
@@ -337,6 +361,28 @@ const MIGRATIONS: Migration[] = [
             )`,
         ],
     },
+    {
+        version: 8,
+        statements: [
+            // The repair v7 missed. `character_shares` gained its lifecycle
+            // columns the same way `mods` gained its table — appended to v4 after
+            // v4 had already been recorded on a deployed database — and v7 fixed
+            // only the tables. The symptom was 500s everywhere a listing was
+            // read: `no such column: status`.
+            //
+            // The same mistake twice is why test/migrations.test.ts exists.
+            addColumnIfMissing('character_shares', 'status', "TEXT NOT NULL DEFAULT 'public'"),
+            addColumnIfMissing('character_shares', 'submitted_at', 'TEXT'),
+            addColumnIfMissing('character_shares', 'reviewed_at', 'TEXT'),
+            addColumnIfMissing('character_shares', 'reviewed_by', 'TEXT'),
+            addColumnIfMissing('character_shares', 'review_note', 'TEXT'),
+            addColumnIfMissing('character_shares', 'scheduled_at', 'TEXT'),
+            addColumnIfMissing('character_shares', 'publish_time', 'TEXT'),
+            addColumnIfMissing('character_shares', 'primary_version', 'TEXT'),
+            addColumnIfMissing('character_shares', 'anonymous', 'INTEGER NOT NULL DEFAULT 0'),
+            addColumnIfMissing('character_shares', 'rating', "TEXT NOT NULL DEFAULT 'explicit'"),
+        ],
+    },
 ];
 
 export class Database {
@@ -373,7 +419,11 @@ export class Database {
 
             this.transaction(() => {
                 for (const statement of migration.statements) {
-                    this.handle.exec(statement);
+                    if (typeof statement === 'string') {
+                        this.handle.exec(statement);
+                    } else {
+                        statement(this.handle);
+                    }
                 }
                 this.handle.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
                     .run(migration.version, new Date().toISOString());
