@@ -326,6 +326,23 @@ export class MarketService {
         return this.requireEntry(ownerId, characterId);
     }
 
+    /**
+     * Point the listing at a version. Moves the listing — and the rankings read
+     * the listing — which is exactly why this is a verb of its own rather than
+     * something that happens as a side effect of editing.
+     */
+    setPrimary(ownerId: string, characterId: string, version: string): string {
+        const result = this.#db.prepare(
+            'UPDATE character_shares SET primary_version = ?, updated_at = ? WHERE user_id = ? AND character_id = ?',
+        ).run(version, this.#now().toISOString(), ownerId, characterId);
+
+        if (Number(result.changes) === 0) {
+            throw new MarketError('not_published', 'this work has no listing to point', 404);
+        }
+
+        return version;
+    }
+
     /** What state a work is in, for the author's own screen. */
     stateOf(ownerId: string, characterId: string): WorkStatus | null {
         const row = this.#db.prepare(

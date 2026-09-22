@@ -16,7 +16,7 @@ const NAV = [
     { href: '/chats', label: '对话', icon: 'chats' },
     { href: '/characters', label: '角色', icon: 'characters' },
     { href: '/worldbooks', label: '世界书', icon: 'world' },
-    { href: '/mods', label: 'Mod', icon: 'world' },
+    { href: '/mods', label: 'Mod', icon: 'mod' },
     { href: '/market', label: '市场', icon: 'market' },
     { href: '/account', label: '账户', icon: 'account' },
 ];

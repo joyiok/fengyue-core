@@ -1208,7 +1208,7 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                     // browsing never reads every user's directory. It does *not*
                     // list it: a submission goes to `pending` and a human looks at
                     // it first.
-                    if (id !== undefined && (sub === 'publish' || sub === 'publish-time')) {
+                    if (id !== undefined && (sub === 'publish' || sub === 'publish-time' || sub === 'primary')) {
                         if (context.market === null || !context.config.marketEnabled || user === null) {
                             return sendJson(response, 400, {
                                 error: 'market_disabled',
@@ -1265,6 +1265,20 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                                 return sendJson(response, 400, { error: 'when must be an ISO date' });
                             }
                             return sendJson(response, 200, { character: market.setPublishTime(user.id, id, body.when) });
+                        }
+
+                        // Point the listing at another version. The author's own
+                        // action, and deliberately *not* a resubmission: it
+                        // changes which release the listing names, not what is in
+                        // it. (It does move the listing in the rankings — that is
+                        // why it is a decision and not an edit.)
+                        if (method === 'PUT' && sub === 'primary') {
+                            const body = JSON.parse((await readBody(request)).toString('utf8') || '{}') as { version?: unknown };
+                            const version = typeof body.version === 'string' ? body.version : null;
+                            if (version === null) {
+                                return sendJson(response, 400, { error: 'version is required' });
+                            }
+                            return sendJson(response, 200, { primary: market.setPrimary(user.id, id, version) });
                         }
 
                         if (method === 'DELETE' && sub === 'publish') {

@@ -14,6 +14,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { CardForm, toDraft, type CardDraft } from '@/components/CardForm';
 import { PublishTimeForm, StatusTag, SubmitWork } from '@/components/SubmitWork';
+import { VersionsPanel } from '@/components/VersionsPanel';
 import { Icon } from '@/components/icons';
 import { Avatar, ConfirmButton, Loading, Notice } from '@/components/ui';
 import { api, avatarUrl, del, get, post, raw } from '@/lib/api';
@@ -208,9 +209,15 @@ export default function CharacterPage(): React.JSX.Element {
                 <SubmitWork characterId={id} current={submission?.character ?? null} onDone={load} />
             )}
 
-            <div style={{ height: 14 }} />
+            <div className="section-title">这张卡</div>
 
             <CardForm initial={toDraft(card.data)} busy={busy} submitLabel="保存" onSave={save} />
+
+            <div className="section-title">发布</div>
+
+            <div style={{ marginTop: 0 }}>
+                <VersionsPanel characterId={id} />
+            </div>
 
             <div className="section-title">对话（{count(chats.length)}）</div>
             {chats.length === 0 ? (

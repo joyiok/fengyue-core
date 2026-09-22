@@ -71,6 +71,29 @@ const paths: Record<string, React.JSX.Element> = {
         </>
     ),
     check: <path d="M5 13l4.5 4.5L19 7" />,
+    // Mod 是「装上去的一块」，不是「世界」——两个功能共用图标就分不清了。
+    mod: (
+        <>
+            <path d="M10 4h4v3.2a1.8 1.8 0 1 0 3.6 0V4h2.4v4.4h-3.2a1.8 1.8 0 1 0 0 3.6h3.2V20H4V4h6z" />
+        </>
+    ),
+    // 版本：一条主干长出分叉。
+    branch: (
+        <>
+            <circle cx="7" cy="6" r="2" />
+            <circle cx="7" cy="18" r="2" />
+            <circle cx="17" cy="10" r="2" />
+            <path d="M7 8v8" />
+            <path d="M7 12h5a3 3 0 0 0 3-3v-.5" />
+        </>
+    ),
+    eyeoff: (
+        <>
+            <path d="M4 4l16 16" />
+            <path d="M9.6 6.4A8.6 8.6 0 0 1 12 6c5 0 9 6 9 6a17 17 0 0 1-2.7 3.3" />
+            <path d="M6.2 8.2A17 17 0 0 0 3 12s4 6 9 6a8.5 8.5 0 0 0 3.4-.7" />
+        </>
+    ),
 };
 
 export function Icon({ name, size = 18 }: { name: keyof typeof paths | string; size?: number }): React.JSX.Element {

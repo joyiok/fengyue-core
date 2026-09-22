@@ -49,7 +49,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
                     <div className="sub">跑这个服务要用的东西，和「你自己在用这个服务」是两件事。</div>
                 </div>
 
-                <div className="row">
+                <div className="tabs">
                     {TABS.map((tab) => (
                         <Link
                             key={tab.href}
