@@ -39,7 +39,34 @@ export function NewChat({
     const [mods, setMods] = useState<Mod[]>([]);
     const [attachedMods, setAttachedMods] = useState<string[]>([]);
     const [busy, setBusy] = useState(false);
+    // What the card asks before the first turn. The declarations travel with the
+    // PNG; the panel, when the author wrote one, is HTML the site renders, with
+    // fields bound through `data-var`.
+    const [asked, setAsked] = useState<{ key: string; label: string; help?: string; default?: string; required?: boolean }[]>([]);
+    const [panel, setPanel] = useState('');
+    const [values, setValues] = useState<Record<string, string>>({});
     const [error, setError] = useState<string | null>(null);
+
+    useEffect(() => {
+        if (picked === null || picked === '') {
+            return;
+        }
+
+        void get<{ data: { extensions?: Record<string, unknown> } }>(`/characters/${encodeURIComponent(picked ?? '')}`).then((card) => {
+            const story = ((card.data.extensions ?? {}) as { story?: Record<string, unknown> }).story ?? {};
+            const declared = Array.isArray(story.variables) ? story.variables as { key: string; default?: string }[] : [];
+            setAsked(declared as never);
+            setPanel(typeof story.panel === 'string' ? story.panel : '');
+            const seeded: Record<string, string> = {};
+            for (const variable of declared) {
+                seeded[variable.key] = variable.default ?? '';
+            }
+            setValues(seeded);
+        }).catch(() => {
+            setAsked([]);
+            setPanel('');
+        });
+    }, [picked]);
 
     useEffect(() => {
         void get<{ characters: CharacterListEntry[] }>('/characters')
@@ -56,7 +83,7 @@ export function NewChat({
         setGreeting(0);
 
         void Promise.all([
-            get<{ card: CharacterCard }>(`/characters/${encodeURIComponent(picked)}`),
+            get<{ card: CharacterCard }>(`/characters/${encodeURIComponent(picked ?? '')}`),
             get<{ worldbooks: WorldbookSummary[] }>('/worldbooks').catch(() => ({ worldbooks: [] })),
         ]).then(([detail, books]) => {
             setCard(detail.card);
@@ -80,7 +107,7 @@ export function NewChat({
             return;
         }
 
-        void get<{ mods: Mod[] }>(`/mods?characterId=${encodeURIComponent(picked)}`)
+        void get<{ mods: Mod[] }>(`/mods?characterId=${encodeURIComponent(picked ?? '')}`)
             .then((available) => {
                 setMods(available.mods.filter((mod) => mayLoad(card, mod)));
                 setAttachedMods([]);
@@ -101,6 +128,7 @@ export function NewChat({
             // book at all", which is a different request from "use the card's".
             const created = await post<Created>('/chats', {
                 cardId: picked,
+                variables: values,
                 greetingIndex: greeting,
                 ...(attached === null ? {} : { worldbookIds: attached }),
                 ...(attachedMods.length === 0 ? {} : { modIds: attachedMods }),
@@ -281,26 +309,26 @@ export function NewChat({
 
                             <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void create()}>
 {asked.length === 0 ? null : (
-                                {    <div className="panel">
-                                {        <div className="section-title" style={{ marginTop: 0 }}>开聊之前</div>
-                                {        {panel === '' ? null : (
-                                {            <div className="stack" dangerouslySetInnerHTML={{ __html: panel }} />
-                                {        )}
-                                {        {asked.map((variable) => (
-                                {            <div className="field" key={variable.key}>
-                                {                <label className="label">{variable.label}{variable.required === true ? ' *' : ''}</label>
-                                {                <input
-                                {                    className="input"
-                                {                    data-var={variable.key}
-                                {                    value={values[variable.key] ?? ''}
-                                {                    onChange={(event) => setValues((previous) => ({ ...previous, [variable.key]: event.target.value }))}
-                                {                />
-                                {                {(variable.help ?? '') === '' ? null : <div className="help">{variable.help}</div>}
-                                {            </div>
-                                {        ))}
-                                {    </div>
-                                {)}
-                                {busy ? '创建中…' : '开始对话'}
+                <div className="panel">
+                    <div className="section-title" style={{ marginTop: 0 }}>开聊之前</div>
+                    {panel === '' ? null : (
+                        <div className="stack" dangerouslySetInnerHTML={{ __html: panel }} />
+                    )}
+                    {asked.map((variable) => (
+                        <div className="field" key={variable.key}>
+                            <label className="label">{variable.label}{variable.required === true ? ' *' : ''}</label>
+                            <input
+                                className="input"
+                                data-var={variable.key}
+                                value={values[variable.key] ?? ''}
+                                onChange={(event) => setValues((previous) => ({ ...previous, [variable.key]: event.target.value }))}
+                            />
+                            {(variable.help ?? '') === '' ? null : <div className="help">{variable.help}</div>}
+                        </div>
+                    ))}
+                </div>
+            )}
+                               {busy ? '创建中…' : '开始对话'}
                             </button>
                         </>
                     )}
