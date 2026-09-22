@@ -82,6 +82,22 @@ cd web && npx tsc --noEmit && npm run build   # 前端
 次费。文本一改就换新 id。每条助手消息都记着产出它的 requestId，这挡的是「客户端没收到流结
 束、但服务端其实已经完成并保存」这种模糊失败。
 
+### 5b. 跑过的迁移是冻住的，只能往后面追加
+
+`MIGRATIONS` 里每一条都只在**第一次**启动时执行一次，版本号记在 `schema_migrations` 里。
+**往一个已经跑过的版本里补语句，它在已部署的库上永远不会执行**——而测试库是全新的、按顺序
+跑全部迁移，所以看起来完全健康。这个 bug 的形状是：测试绿、自检绿、线上缺表，直到有人
+第一次用到那张表才炸。
+
+> 不要这样做：在 `version: 4` 的语句列表里加一句 `CREATE TABLE`。**加一个新的 `version`。**
+> 哪怕是修旧账，也用 `CREATE TABLE IF NOT EXISTS` 追一条新的（见 v7 就是这么修的）。
+
+部署后值得核一下：
+
+```bash
+python3 -c "import sqlite3;db=sqlite3.connect('file:data/story.sqlite?mode=ro',uri=True);print(db.execute('select max(version) from schema_migrations').fetchone())"
+```
+
 ### 6. 账本只追加
 
 `usage_ledger` 与 `credit_ledger` 都是不可变流水，余额与用量一律 `SUM` 出来。

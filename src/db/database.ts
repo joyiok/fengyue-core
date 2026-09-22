@@ -293,6 +293,50 @@ const MIGRATIONS: Migration[] = [
             )`,
         ],
     },
+    {
+        version: 7,
+        statements: [
+            // Repair, and a reminder of the rule this fixes: **a migration that
+            // has run is frozen**. `mods` and `character_versions` were added to
+            // v4 *after* v4 had already been recorded on a deployed database, so
+            // those statements never ran there — while a fresh test database,
+            // which runs every migration in order, looked perfectly healthy.
+            // The tests could not see it. `check.sh` could not either: the app
+            // only touches `mods` when somebody loads one.
+            //
+            // Both are `IF NOT EXISTS`, so this is a no-op on a database that
+            // already has them and a repair on one that never did.
+            `CREATE TABLE IF NOT EXISTS mods (
+                id                 TEXT PRIMARY KEY,
+                owner_id           TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                name               TEXT NOT NULL,
+                description        TEXT NOT NULL DEFAULT '',
+                visibility         TEXT NOT NULL DEFAULT 'private',
+                scope              TEXT NOT NULL DEFAULT 'shared',
+                bound_character_id TEXT,
+                system_prompt      TEXT NOT NULL DEFAULT '',
+                post_history       TEXT NOT NULL DEFAULT '',
+                worldbook          TEXT NOT NULL DEFAULT '{}',
+                style              TEXT NOT NULL DEFAULT '',
+                memory             TEXT NOT NULL DEFAULT '',
+                tags               TEXT NOT NULL DEFAULT '[]',
+                uses               INTEGER NOT NULL DEFAULT 0,
+                created_at         TEXT NOT NULL,
+                updated_at         TEXT NOT NULL
+            )`,
+            `CREATE INDEX IF NOT EXISTS idx_mods_owner ON mods(owner_id)`,
+            `CREATE INDEX IF NOT EXISTS idx_mods_gallery ON mods(visibility, scope)`,
+            `CREATE TABLE IF NOT EXISTS character_versions (
+                owner_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                character_id TEXT NOT NULL,
+                version      TEXT NOT NULL,
+                label        TEXT NOT NULL DEFAULT '',
+                note         TEXT NOT NULL DEFAULT '',
+                created_at   TEXT NOT NULL,
+                PRIMARY KEY (owner_id, character_id, version)
+            )`,
+        ],
+    },
 ];
 
 export class Database {
