@@ -262,3 +262,44 @@ test('a mod extends the setting: after the card, before the examples, in order',
     assert.equal(modded.messages[modded.messages.length - 2]?.content, postHistory?.content,
         'post-history stays glued to the final user message');
 });
+
+test('a card asks, the reader answers, and the answers are in the text', async () => {
+    const { applyVariables, substituteVariables, sanitizePanelHtml, cardPanel, assertVariableKey } = await import('../src/prompt/variables.ts');
+
+    // Keys are `[A-Za-z_][A-Za-z0-9_]*` and no longer than 30 — the same rules
+    // the panel that collects them has to live with. `{{名字}}` is not a name.
+    assert.throws(() => assertVariableKey('名字'));
+    assert.throws(() => assertVariableKey('1st'));
+    assert.doesNotThrow(() => assertVariableKey('player_name'));
+
+    // A hole is filled…
+    assert.equal(substituteVariables('你好，{{ name }}。', { name: '阿槐' }), '你好，阿槐。');
+    // …and a hole nobody declared is left alone. `{{user}}` is not this
+    // mechanism's to fill: it gets the persona's real name later, and a silent
+    // blank here would eat it.
+    assert.equal(substituteVariables('写给 {{user}}', {}), '写给 {{user}}');
+
+    const card = {
+        data: {
+            name: '晚照',
+            first_mes: '「{{ greeting }}, 进来吧。」',
+            system_prompt: '她叫{{ char_name }}。',
+            description: '一间叫{{ shop }}的书店。',
+            personality: '慢',
+            scenario: '雨夜',
+            post_history_instructions: '保持语气。',
+            extensions: { story: { variables: [{ key: 'char_name', label: '她叫什么', default: '晚照' }], panel: '<p onclick="x">hi<script>steal()</script></p>' } },
+        },
+    };
+
+    const filled = applyVariables(card, { char_name: '阿槐', greeting: '客人', shop: '晚照' });
+    assert.equal(filled.data.first_mes, '「客人, 进来吧。」');
+    assert.equal(filled.data.system_prompt, '她叫阿槐。');
+    // The original is untouched — it is what the author wrote, and it stays that
+    // way on disk and in the editor.
+    assert.equal(card.data.first_mes, '「{{ greeting }}, 进来吧。」');
+
+    // The panel is HTML we render, so it cannot be HTML that runs.
+    assert.equal(sanitizePanelHtml('<p onclick="x">hi<script>steal()</script></p>'), '<p>hi</p>');
+    assert.equal(cardPanel(card), '<p>hi</p>');
+});

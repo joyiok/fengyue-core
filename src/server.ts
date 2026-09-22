@@ -1175,6 +1175,7 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                             modIds?: unknown;
                             worldbookIds?: unknown;
                             version?: unknown;
+                            variables?: unknown;
                         };
 
                         const message = typeof body.message === 'string' ? body.message : '';
@@ -1199,6 +1200,11 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                                 personaName: personaName(),
                                 ...(modState === null ? {} : { mods: modState.payloads }),
                             },
+                            // So an author can check their `{{key}}` holes before
+                            // anyone fills them in for real.
+                            ...(typeof body.variables === 'object' && body.variables !== null
+                                ? { variables: body.variables as Record<string, string> }
+                                : {}),
                             ...(modState === null
                                 ? (worldbookIds === undefined ? {} : { worldbook: await library.resolveWorldbooks(card, worldbookIds) })
                                 : { worldbook: mergeWorldbooks(await library.resolveWorldbooks(card, worldbookIds), modState.entries) }),

@@ -21,6 +21,7 @@ import type { CharacterCard } from '../cards/types.ts';
 import type { ChatMessage } from '../chats/types.ts';
 import { estimateMessagesTokens, estimateTokens } from './estimate.ts';
 import { parseExampleMessages, substituteNames, type ExampleNames } from './examples.ts';
+import { applyVariables } from './variables.ts';
 import { EMPTY_MEMORY, type MemoryState } from './memory.ts';
 import {
     DEFAULT_HISTORY_TOKEN_BUDGET,
@@ -48,6 +49,8 @@ export interface AssembleInput {
     messageIndex?: number;
     /** Rolling summary that stands in for older messages. */
     memory?: MemoryState | null;
+    /** Answers to the card's `{{key}}` placeholders, from the pre-chat panel. */
+    variables?: Readonly<Record<string, string>>;
 }
 
 export interface AssembleResult {
@@ -269,7 +272,13 @@ function summarizeActivations(entries: ActivatedWorldInfoEntry[]): WorldInfoActi
 }
 
 export function assemblePrompt(input: AssembleInput): AssembleResult {
-    const { card, history, userMessage, options } = input;
+    const { history, userMessage, options } = input;
+
+    // The card with the reader's answers already in it. Everything below reads
+    // this, so `{{key}}` is filled in exactly once and the debug panel shows the
+    // same text the model is given. Unknown keys survive, so `{{user}}` is still
+    // there to be replaced by the name the persona actually has.
+    const card = applyVariables(input.card, input.variables ?? {});
 
     const names: ExampleNames = {
         char: card.data.name.trim() === '' ? 'Character' : card.data.name.trim(),

@@ -40,6 +40,8 @@ import type { WorldInfoState } from '../prompt/worldinfo.ts';
 
 export interface SessionOptions {
     personaName: string;
+    /** Answers to the card's `{{key}}` placeholders, fixed when the chat starts. */
+    variables?: Readonly<Record<string, string>>;
     prompt?: Omit<PromptOptions, 'personaName'>;
     /**
      * World book ids to activate. Defaults to the card's primary world
@@ -102,6 +104,7 @@ interface StoryExtra {
     firstTokenMs?: number;
     streamed?: boolean;
     previousReplies?: string[];
+    variables?: Record<string, string>;
     greetingIndex?: number;
     personaName?: string;
 }
@@ -146,6 +149,7 @@ export class ChatSession {
     readonly name: string;
     readonly card: CharacterCard;
     readonly personaName: string;
+    readonly variables: Readonly<Record<string, string>>;
     readonly promptOptions: Omit<PromptOptions, 'personaName'>;
     private readonly memoryOptions: MemoryConfig;
     private readonly blockedWords: string[];
@@ -174,6 +178,7 @@ export class ChatSession {
         this.name = name;
         this.card = card;
         this.personaName = options.personaName;
+        this.variables = options.variables ?? {};
         this.promptOptions = { ...defaultPromptOptions(), ...options.prompt };
         this.memoryOptions = { ...options.memory };
         this.blockedWords = options.blockedWords ?? [];
@@ -213,7 +218,7 @@ export class ChatSession {
                 is_user: false,
                 send_date: new Date().toISOString(),
                 mes: greeting,
-                extra: { story: { greetingIndex, personaName: options.personaName } satisfies StoryExtra },
+                extra: { story: { greetingIndex, personaName: options.personaName, variables: options.variables ?? {} } satisfies StoryExtra },
             });
         }
 
@@ -227,7 +232,7 @@ export class ChatSession {
             card,
             options,
             log,
-            { story: { greetingIndex, personaName: options.personaName, ...(options.version === undefined ? {} : { version: options.version }) } },
+            { story: { greetingIndex, personaName: options.personaName, variables: options.variables ?? {}, ...(options.version === undefined ? {} : { version: options.version }) } },
             withMods,
             {},
             { ...EMPTY_MEMORY },
@@ -311,6 +316,7 @@ export class ChatSession {
         }
 
         const assembled = assemblePrompt({
+            variables: this.variables,
             card: this.card,
             history: this.log,
             userMessage,
@@ -569,6 +575,7 @@ export class ChatSession {
     /** Preview the prompt for the next message without calling the model. */
     preview(userMessage: string): ReturnType<typeof assemblePrompt> {
         return assemblePrompt({
+            variables: this.variables,
             card: this.card,
             history: this.log,
             userMessage,
