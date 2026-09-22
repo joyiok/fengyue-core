@@ -26,6 +26,7 @@ import { Database } from '../src/db/database.ts';
 import { Library } from '../src/library.ts';
 import { MarketService } from '../src/market/service.ts';
 import { createSolidPng, decodePng, isPng } from '../src/png/chunks.ts';
+import { ModsService } from '../src/mods/service.ts';
 import { createServer, type ServerContext } from '../src/server.ts';
 import { respondWith, startMockModel } from './helpers/mock-model.ts';
 
@@ -103,6 +104,7 @@ async function withServer(run: (harness: Harness) => Promise<void>): Promise<voi
         billing,
         credits,
         market,
+        mods: new ModsService(db),
         libraryFor: (userId: string): Library => {
             const root = path.join(config.dataRoot, 'users', userId);
             const existing = libraries.get(root) ?? new Library(root);
@@ -505,5 +507,55 @@ test('a message can be rewritten in place without asking the model anything', as
             headers: bearer(owner.token),
             body: JSON.stringify({ message: '' }),
         })).status, 400);
+    });
+});
+
+test('a card\'s mod policy is enforced at POST /chats, not by hiding a button', async () => {
+    await withServer(async ({ base, register }) => {
+        const owner = await register('owner');
+        const stranger = await register('stranger');
+
+        // `stranger` writes a mod and puts it on the gallery.
+        const made = await fetch(`${base}/api/v1/mods`, {
+            method: 'POST',
+            headers: bearer(stranger.token),
+            body: JSON.stringify({ name: '别人的场景', systemPrompt: '外面在下雨。' }),
+        });
+        const modId = ((await made.json()) as { mod: { id: string } }).mod.id;
+        await fetch(`${base}/api/v1/mods/${encodeURIComponent(modId)}/visibility`, {
+            method: 'POST',
+            headers: bearer(stranger.token),
+            body: JSON.stringify({ visibility: 'public' }),
+        });
+
+        // A card that forbids mods entirely.
+        await importCard(base, owner.token, JSON.stringify(normalizeCard({
+            spec: 'chara_card_v2',
+            data: { name: 'linzhao', description: 'x', extensions: { story: { mods: { policy: 'none' } } } },
+        })));
+
+        const refused = await fetch(`${base}/api/v1/chats`, {
+            method: 'POST',
+            headers: bearer(owner.token),
+            body: JSON.stringify({ cardId: 'linzhao', modIds: [modId] }),
+        });
+        const text = await refused.text();
+        assert.equal(refused.status, 403, text);
+        assert.equal(JSON.parse(text).error, 'policy');
+
+        // And one that allows anything takes it: the same request, one field
+        // different, is a different decision.
+        await importCard(base, owner.token, JSON.stringify(normalizeCard({
+            spec: 'chara_card_v2',
+            data: { name: 'open', description: 'x', extensions: { story: { mods: { policy: 'all' } } } },
+        })), 'open');
+
+        const allowed = await fetch(`${base}/api/v1/chats`, {
+            method: 'POST',
+            headers: bearer(owner.token),
+            body: JSON.stringify({ cardId: 'open', modIds: [modId] }),
+        });
+        const ok = await allowed.text();
+        assert.equal(allowed.status, 201, ok);
     });
 });
