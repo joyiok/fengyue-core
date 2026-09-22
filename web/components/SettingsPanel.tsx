@@ -73,7 +73,7 @@ export function SettingsPanel(): React.JSX.Element {
     const [note, setNote] = useState<string | null>(null);
 
     const load = useCallback(async (): Promise<void> => {
-        setEntries((await get<{ entries: SettingEntry[] }>('/settings')).entries);
+        setEntries((await get<{ entries: SettingEntry[] }>('/admin/settings')).entries);
         setDrafts({});
     }, []);
 
@@ -120,7 +120,7 @@ export function SettingsPanel(): React.JSX.Element {
         setNote(null);
 
         try {
-            await put('/settings', payload);
+            await put('/admin/settings', payload);
             const touched = Object.keys(payload).filter((key) => entries?.find((entry) => entry.key === key)?.restart === true);
             setNote(touched.length === 0
                 ? '已保存，立刻生效。'
@@ -137,7 +137,7 @@ export function SettingsPanel(): React.JSX.Element {
         setError(null);
 
         try {
-            await post('/settings/reset', { keys: [key] });
+            await post('/admin/settings/reset', { keys: [key] });
             await load();
         } catch (caught) {
             setError(caught instanceof Error ? caught.message : String(caught));
@@ -154,8 +154,6 @@ export function SettingsPanel(): React.JSX.Element {
 
     return (
         <>
-            <div className="section-title">设置</div>
-
             {error !== null ? <div style={{ marginBottom: 12 }}><Notice kind="error">{error}</Notice></div> : null}
             {note !== null ? <div style={{ marginBottom: 12 }}><Notice kind="ok">{note}</Notice></div> : null}
 

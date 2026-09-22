@@ -637,7 +637,7 @@ test('an account with no credits is refused before the model is called', async (
 
             // An admin top-up reopens the door. The first account is the admin, so
             // this is the owner granting to herself.
-            const granted = await fetch(`${base}/api/v1/users/${owner.user.id}/credits`, {
+            const granted = await fetch(`${base}/api/v1/admin/users/${owner.user.id}/credits`, {
                 method: 'POST',
                 headers: bearer(owner.token),
                 body: JSON.stringify({ amount: 5 }),
@@ -665,14 +665,14 @@ test('only an admin can grant credits', async () => {
             const admin = await register('admin');
             const member = await register('member');
 
-            const forbidden = await fetch(`${base}/api/v1/users/${member.user.id}/credits`, {
+            const forbidden = await fetch(`${base}/api/v1/admin/users/${member.user.id}/credits`, {
                 method: 'POST',
                 headers: bearer(member.token),
                 body: JSON.stringify({ amount: 500 }),
             });
             assert.equal(forbidden.status, 403);
 
-            const grant = (): Promise<Response> => fetch(`${base}/api/v1/users/${member.user.id}/credits`, {
+            const grant = (): Promise<Response> => fetch(`${base}/api/v1/admin/users/${member.user.id}/credits`, {
                 method: 'POST',
                 headers: bearer(admin.token),
                 body: JSON.stringify({ amount: 500, reference: 'goodwill' }),
@@ -687,7 +687,7 @@ test('only an admin can grant credits', async () => {
             assert.deepEqual(await second.json(), { userId: member.user.id, recorded: false, balance: 600 });
             assert.equal((await creditsOf(member.token)).credits.balance, 600);
 
-            const zero = await fetch(`${base}/api/v1/users/${member.user.id}/credits`, {
+            const zero = await fetch(`${base}/api/v1/admin/users/${member.user.id}/credits`, {
                 method: 'POST',
                 headers: bearer(admin.token),
                 body: JSON.stringify({ amount: 0 }),

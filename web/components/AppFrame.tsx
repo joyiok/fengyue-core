@@ -48,6 +48,31 @@ function Rail(): React.JSX.Element {
 
             <div className="rail-spacer" />
 
+            {/* The operator area is its own block below a divider, not another
+                entry in the list of things you do as a user of this service. */}
+            {me?.user.role === 'admin' ? (
+                <>
+                    <div className="rail-divider" />
+                    <div className="rail-label">管理</div>
+                    <Link
+                        href="/admin/settings"
+                        className="nav-link"
+                        aria-current={current('/admin/settings') ? 'page' : undefined}
+                    >
+                        <Icon name="account" />
+                        <span>设置</span>
+                    </Link>
+                    <Link
+                        href="/admin/users"
+                        className="nav-link"
+                        aria-current={current('/admin/users') ? 'page' : undefined}
+                    >
+                        <Icon name="characters" />
+                        <span>用户</span>
+                    </Link>
+                </>
+            ) : null}
+
             <div className="rail-user">
                 <div className="handle">{me?.user.displayName || me?.user.handle}</div>
                 <div className="meta">

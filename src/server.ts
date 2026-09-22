@@ -553,131 +553,145 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                     }
                 }
 
-                // ------------------------------------------------------ admin
+                // ------------------------------------------------------- admin
 
-                if (parts[2] === 'users') {
+                // Everything an operator does sits behind one namespace and one
+                // guard, and the routes below live *inside* it. Spreading admin
+                // routes through the user-facing surface is exactly how a
+                // `role !== 'admin'` check goes missing on one of them — so there
+                // is one check, here, and inside these braces `user` is known to
+                // be an admin.
+                if (parts[2] === 'admin') {
+                    if (context.auth === null) {
+                        return sendJson(response, 400, {
+                            error: 'auth_disabled',
+                            message: 'this server runs without accounts, so there is nothing to administer',
+                        });
+                    }
+
                     if (user === null) {
-                        return sendJson(response, 400, { error: 'auth_disabled', message: 'this server runs without accounts' });
+                        return sendJson(response, 401, {
+                            error: 'authentication_required',
+                            message: 'send Authorization: Bearer <token>, or log in at /api/v1/auth/login',
+                        });
                     }
 
                     if (user.role !== 'admin') {
                         return sendJson(response, 403, { error: 'forbidden', message: 'admin role required' });
                     }
 
-                    const targetId = parts[3] ? decodeURIComponent(parts[3]) : undefined;
+                    if (parts[3] === 'users') {
+                        const targetId = parts[4] ? decodeURIComponent(parts[4]) : undefined;
 
-                    if (method === 'GET' && targetId === undefined) {
-                        const users = (context.auth as AuthService).list().map((entry) => ({
-                            ...entry,
-                            usage: context.billing?.summary(entry.id) ?? null,
-                        }));
-                        return sendJson(response, 200, { users });
-                    }
-
-                    if (method === 'PUT' && targetId !== undefined && parts[4] === 'quota') {
-                        const body = JSON.parse((await readBody(request)).toString('utf8') || '{}') as Record<string, unknown>;
-                        const pick = (key: string, fallback: number): number => {
-                            const value = Number(body[key] ?? fallback);
-                            return Number.isFinite(value) && value >= 0 ? Math.trunc(value) : fallback;
-                        };
-
-                        const current = context.billing?.policyFor(targetId);
-                        if (context.billing === null || current === undefined) {
-                            return sendJson(response, 400, { error: 'auth_disabled' });
+                        if (method === 'GET' && targetId === undefined) {
+                            const users = (context.auth as AuthService).list().map((entry) => ({
+                                ...entry,
+                                usage: context.billing?.summary(entry.id) ?? null,
+                            }));
+                            return sendJson(response, 200, { users });
                         }
 
-                        const policy = context.billing.setPolicy(targetId, {
-                            dailyTokenLimit: pick('dailyTokenLimit', current.dailyTokenLimit),
-                            monthlyTokenLimit: pick('monthlyTokenLimit', current.monthlyTokenLimit),
-                            maxTokensPerRequest: pick('maxTokensPerRequest', current.maxTokensPerRequest),
-                        });
+                        if (method === 'PUT' && targetId !== undefined && parts[5] === 'quota') {
+                            const body = JSON.parse((await readBody(request)).toString('utf8') || '{}') as Record<string, unknown>;
+                            const pick = (key: string, fallback: number): number => {
+                                const value = Number(body[key] ?? fallback);
+                                return Number.isFinite(value) && value >= 0 ? Math.trunc(value) : fallback;
+                            };
 
-                        return sendJson(response, 200, { userId: targetId, policy });
-                    }
+                            const current = context.billing?.policyFor(targetId);
+                            if (context.billing === null || current === undefined) {
+                                return sendJson(response, 400, { error: 'auth_disabled' });
+                            }
 
-                    if (method === 'PUT' && targetId !== undefined && parts[4] === 'status') {
-                        const body = JSON.parse((await readBody(request)).toString('utf8') || '{}') as { status?: string };
-                        const status = body.status === 'disabled' ? 'disabled' : 'active';
-                        const updated = (context.auth as AuthService).setStatus(targetId, status);
-                        return sendJson(response, 200, { user: updated });
-                    }
+                            const policy = context.billing.setPolicy(targetId, {
+                                dailyTokenLimit: pick('dailyTokenLimit', current.dailyTokenLimit),
+                                monthlyTokenLimit: pick('monthlyTokenLimit', current.monthlyTokenLimit),
+                                maxTokensPerRequest: pick('maxTokensPerRequest', current.maxTokensPerRequest),
+                            });
 
-                    // Manual top-up. Grants only: a negative adjustment would be a
-                    // silent clawback, and the ledger is append-only on purpose.
-                    if (method === 'POST' && targetId !== undefined && parts[4] === 'credits') {
-                        if (context.credits === null) {
-                            return sendJson(response, 400, { error: 'credits_disabled' });
+                            return sendJson(response, 200, { userId: targetId, policy });
                         }
 
-                        const body = JSON.parse((await readBody(request)).toString('utf8') || '{}') as {
-                            amount?: number;
-                            reference?: string;
-                        };
-                        const amount = Math.trunc(Number(body.amount ?? 0));
-                        if (!Number.isFinite(amount) || amount <= 0) {
-                            return sendJson(response, 400, { error: 'amount must be a positive integer' });
+                        if (method === 'PUT' && targetId !== undefined && parts[5] === 'status') {
+                            const body = JSON.parse((await readBody(request)).toString('utf8') || '{}') as { status?: string };
+                            const status = body.status === 'disabled' ? 'disabled' : 'active';
+                            const updated = (context.auth as AuthService).setStatus(targetId, status);
+                            return sendJson(response, 200, { user: updated });
                         }
 
-                        const result = context.credits.grant(
-                            targetId,
-                            amount,
-                            'admin',
-                            body.reference === undefined ? undefined : String(body.reference),
-                            { by: user.id },
-                        );
+                        // Manual top-up. Grants only: a negative adjustment would be a
+                        // silent clawback, and the ledger is append-only on purpose.
+                        if (method === 'POST' && targetId !== undefined && parts[5] === 'credits') {
+                            if (context.credits === null) {
+                                return sendJson(response, 400, { error: 'credits_disabled' });
+                            }
 
-                        return sendJson(response, 200, { userId: targetId, ...result });
-                    }
-                }
+                            const body = JSON.parse((await readBody(request)).toString('utf8') || '{}') as {
+                                amount?: number;
+                                reference?: string;
+                            };
+                            const amount = Math.trunc(Number(body.amount ?? 0));
+                            if (!Number.isFinite(amount) || amount <= 0) {
+                                return sendJson(response, 400, { error: 'amount must be a positive integer' });
+                            }
 
-                // ------------------------------------------------------ settings
+                            const result = context.credits.grant(
+                                targetId,
+                                amount,
+                                'admin',
+                                body.reference === undefined ? undefined : String(body.reference),
+                                { by: user.id },
+                            );
 
-                // Runtime configuration: the whole point is that changing the
-                // model key or a quota is an update, not a redeploy. Admin-only
-                // when there are accounts; in single-user mode the box is already
-                // yours. Secrets come back masked — the CLI is where you read one.
-                if (parts[2] === 'settings') {
-                    const settings = context.settings ?? null;
-
-                    if (settings === null) {
-                        return sendJson(response, 400, {
-                            error: 'settings_disabled',
-                            message: 'this server has no settings store behind it',
-                        });
-                    }
-
-                    if (user !== null && user.role !== 'admin') {
-                        return sendJson(response, 403, { error: 'forbidden', message: 'admin role required' });
+                            return sendJson(response, 200, { userId: targetId, ...result });
+                        }
                     }
 
-                    if (method === 'GET') {
-                        return sendJson(response, 200, { entries: settings.list() });
-                    }
+                    // ------------------------------------------------------ settings
 
-                    if (method === 'POST' && parts[3] === 'reset') {
-                        const body = JSON.parse((await readBody(request)).toString('utf8') || '{}') as { keys?: unknown };
-                        const keys = Array.isArray(body.keys) ? body.keys.map(String) : [];
+                    // Runtime configuration: the whole point is that changing the
+                    // model key or a quota is an update, not a redeploy. Admin-only
+                    // when there are accounts; in single-user mode the box is already
+                    // yours. Secrets come back masked — the CLI is where you read one.
+                    if (parts[3] === 'settings') {
+                        const settings = context.settings ?? null;
 
-                        try {
-                            return sendJson(response, 200, { entries: settings.reset(keys) });
-                        } catch (error) {
+                        if (settings === null) {
                             return sendJson(response, 400, {
-                                error: 'invalid_setting',
-                                message: error instanceof Error ? error.message : String(error),
+                                error: 'settings_disabled',
+                                message: 'this server has no settings store behind it',
                             });
                         }
-                    }
 
-                    if (method === 'PUT') {
-                        const body = JSON.parse((await readBody(request)).toString('utf8') || '{}') as Record<string, unknown>;
+                        if (method === 'GET') {
+                            return sendJson(response, 200, { entries: settings.list() });
+                        }
 
-                        try {
-                            return sendJson(response, 200, { entries: settings.set(body) });
-                        } catch (error) {
-                            return sendJson(response, 400, {
-                                error: 'invalid_setting',
-                                message: error instanceof Error ? error.message : String(error),
-                            });
+                        if (method === 'POST' && parts[4] === 'reset') {
+                            const body = JSON.parse((await readBody(request)).toString('utf8') || '{}') as { keys?: unknown };
+                            const keys = Array.isArray(body.keys) ? body.keys.map(String) : [];
+
+                            try {
+                                return sendJson(response, 200, { entries: settings.reset(keys) });
+                            } catch (error) {
+                                return sendJson(response, 400, {
+                                    error: 'invalid_setting',
+                                    message: error instanceof Error ? error.message : String(error),
+                                });
+                            }
+                        }
+
+                        if (method === 'PUT') {
+                            const body = JSON.parse((await readBody(request)).toString('utf8') || '{}') as Record<string, unknown>;
+
+                            try {
+                                return sendJson(response, 200, { entries: settings.set(body) });
+                            } catch (error) {
+                                return sendJson(response, 400, {
+                                    error: 'invalid_setting',
+                                    message: error instanceof Error ? error.message : String(error),
+                                });
+                            }
                         }
                     }
                 }

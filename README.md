@@ -2,6 +2,7 @@
 
 自建小说站后端的核心层。目标形态见[《自建后端架构方案》](docs/product-backend-plan.md)，
 **为什么这么设计、代价是什么**见[《架构与设计》](docs/architecture.md)（接手前建议先读后者）。
+要在里面动手，先读 [`AGENTS.md`](AGENTS.md)：必须遵守的九条规矩、怎么验、加配置项的正确姿势。
 
 - **M0 资产格式兼容层**：读写 SillyTavern 的角色卡、世界书、会话记录
 - **M1 单用户对话**：提示词引擎 + 模型网关 + 会话持久化
@@ -257,8 +258,9 @@ IGNORE`）。**这是环境变量唯一被读取的时刻**；行一旦存在就
 三个例外标了 `restart`：`auth.enabled`（决定要不要建账号服务，也决定数据目录布局）、
 `server.host` / `server.port`（监听地址在启动时绑一次）。
 
-改的方式三选一：网页端「账户 → 设置」、`node src/cli.ts settings set <key> <value>`、或者
-`PUT /api/v1/settings`（管理员）。`settings list` 会把每个键的值、是否已改、是不是要重启
+改的方式三选一：网页端「管理 → 设置」、`node src/cli.ts settings set <key> <value>`、或者
+`PUT /api/v1/admin/settings`。管理类接口全部在 `/api/v1/admin/*` 一个命名空间下，角色校验
+只有一处——运营者做的事和用户做的事分开，见 [AGENTS.md](AGENTS.md)。`settings list` 会把每个键的值、是否已改、是不是要重启
 都列出来；`model.apiKey` 这类密钥走 HTTP 一律打码，只有 CLI 会显示原文。
 
 存储就是一个三列的小表：
@@ -330,7 +332,7 @@ GET    /api/v1/me/invites                      我发出的邀请码
 POST   /api/v1/me/invites                      生成邀请码 {"count":1}
 POST   /api/v1/me/invites/redeem               兑换 {"code":"..."}
 GET    /api/v1/me/favorites                    我收藏的角色
-POST   /api/v1/users/:id/credits               管理员加积分 {"amount":N,"reference":"..."}
+POST   /api/v1/admin/users/:id/credits         管理员加积分 {"amount":N,"reference":"..."}
 
 GET    /api/v1/market?q=&tag=&sort=hot|new|name&limit=&offset=
 GET    /api/v1/market/:ownerId/:characterId    详情（非本人浏览会计一次浏览）
@@ -356,9 +358,12 @@ GET    /api/v1/market/:ownerId/:characterId/card.png    已发布卡的头像
 GET    /api/v1/market/:ownerId/:characterId/card.json   已发布卡的完整内容
 DELETE /api/v1/chats/:cardId/:chatName         删一个会话
 DELETE /api/v1/chats/:cardId/:chatName/messages/:index  删一条消息
-GET    /api/v1/settings                     全部配置（管理员；密钥打码）
-PUT    /api/v1/settings                     改配置 {"model.name":"…"}（管理员）
-POST   /api/v1/settings/reset               改回启动值 {"keys":["…"]}（管理员）
+GET    /api/v1/admin/settings               全部配置（密钥打码）
+PUT    /api/v1/admin/settings               改配置 {"model.name":"…"}
+POST   /api/v1/admin/settings/reset         改回启动值 {"keys":["…"]}
+GET    /api/v1/admin/users                   账号列表 + 用量
+PUT    /api/v1/admin/users/:id/quota          改限额
+PUT    /api/v1/admin/users/:id/status         启用/停用
 ```
 
 `GET /api/v1/chats/:cardId/:chatName` 带 `?offset=&limit=` 可以分页（都不给就是整份，

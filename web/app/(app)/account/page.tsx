@@ -11,8 +11,6 @@
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 
-import { AdminPanel } from '@/components/AdminPanel';
-import { SettingsPanel } from '@/components/SettingsPanel';
 import { Icon } from '@/components/icons';
 import { Loading, Meter, Notice } from '@/components/ui';
 import { get, post } from '@/lib/api';
@@ -77,7 +75,10 @@ export default function AccountPage(): React.JSX.Element {
             <div className="page-head">
                 <div>
                     <h1>账户</h1>
-                    <div className="sub">@{handle}{role === 'admin' ? ' · 管理员' : ''}</div>
+                    <div className="sub">
+                        @{handle}{role === 'admin' ? ' · 管理员' : ''}
+                        {role === 'admin' ? <Link href="/admin/settings" style={{ color: 'var(--lamp)', marginLeft: 10 }}>管理入口 →</Link> : null}
+                    </div>
                 </div>
             </div>
 
@@ -258,12 +259,10 @@ export default function AccountPage(): React.JSX.Element {
                 </div>
             )}
 
-            {role === 'admin' ? (
-                <>
-                    <SettingsPanel />
-                    <AdminPanel />
-                </>
-            ) : null}
+            {/* Operator controls live in /admin, on purpose: running the service
+                and using it are different jobs, and mixing them into one screen
+                is how someone changes a production quota while looking for their
+                own balance. */}
         </div>
     );
 }

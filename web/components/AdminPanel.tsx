@@ -22,7 +22,7 @@ export function AdminPanel(): React.JSX.Element {
     const [drafts, setDrafts] = useState<Record<string, { daily: string; monthly: string; perRequest: string; grant: string }>>({});
 
     const load = useCallback(async (): Promise<void> => {
-        setRows((await get<{ users: Row[] }>('/users')).users);
+        setRows((await get<{ users: Row[] }>('/admin/users')).users);
     }, []);
 
     useEffect(() => {
@@ -55,7 +55,7 @@ export function AdminPanel(): React.JSX.Element {
 
     return (
         <>
-            <div className="section-title">用户（管理员）</div>
+            <div className="section-title">用户</div>
             {error !== null ? <div style={{ marginBottom: 12 }}><span className="notice error">{error}</span></div> : null}
             {note !== null ? <div style={{ marginBottom: 12 }}><span className="notice ok">{note}</span></div> : null}
 
@@ -78,7 +78,7 @@ export function AdminPanel(): React.JSX.Element {
                                         type="button"
                                         className="btn btn-sm"
                                         onClick={() => void run(
-                                            () => put(`/users/${encodeURIComponent(row.id)}/status`, { status: row.status === 'disabled' ? 'active' : 'disabled' }),
+                                            () => put(`/admin/users/${encodeURIComponent(row.id)}/status`, { status: row.status === 'disabled' ? 'active' : 'disabled' }),
                                             '已更新状态。',
                                         )}
                                     >
@@ -101,7 +101,7 @@ export function AdminPanel(): React.JSX.Element {
                                         type="button"
                                         className="btn btn-sm"
                                         onClick={() => void run(
-                                            () => put(`/users/${encodeURIComponent(row.id)}/quota`, {
+                                            () => put(`/admin/users/${encodeURIComponent(row.id)}/quota`, {
                                                 dailyTokenLimit: Number(form.daily),
                                                 monthlyTokenLimit: Number(form.monthly),
                                                 maxTokensPerRequest: Number(form.perRequest),
@@ -120,7 +120,7 @@ export function AdminPanel(): React.JSX.Element {
                                         className="btn btn-sm"
                                         disabled={form.grant.trim() === ''}
                                         onClick={() => void run(
-                                            () => post(`/users/${encodeURIComponent(row.id)}/credits`, { amount: Number(form.grant), reference: 'admin' }),
+                                            () => post(`/admin/users/${encodeURIComponent(row.id)}/credits`, { amount: Number(form.grant), reference: 'admin' }),
                                             '已入账。',
                                         )}
                                     >

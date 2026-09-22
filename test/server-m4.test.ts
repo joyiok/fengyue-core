@@ -9,11 +9,12 @@ import { FAST_KDF } from '../src/auth/passwords.ts';
 import { AuthService } from '../src/auth/service.ts';
 import { BillingService } from '../src/billing/service.ts';
 import { normalizeCard } from '../src/cards/types.ts';
-import { loadAppConfig, type AppConfig, type QuotaPolicy } from '../src/config.ts';
+import { appConfigToValues, bootstrapOf, loadAppConfig, type AppConfig, type QuotaPolicy } from '../src/config.ts';
 import { Database } from '../src/db/database.ts';
 import type { ModelConfig } from '../src/gateway/types.ts';
 import { Library } from '../src/library.ts';
 import { createAppContext, createServer, type ServerContext } from '../src/server.ts';
+import { SettingsService } from '../src/settings/service.ts';
 import { respondWith, respondSse, startMockModel, type MockUsage } from './helpers/mock-model.ts';
 
 const POLICY: QuotaPolicy = { dailyTokenLimit: 100_000, monthlyTokenLimit: 1_000_000, maxTokensPerRequest: 100 };
@@ -58,9 +59,17 @@ async function withServer(
         maxConcurrentStreamsPerUser: config.maxConcurrentStreamsPerUser,
     });
 
+    // A real settings store, seeded from this test's own config: the admin
+    // namespace is one of the things under test and it needs one behind it.
+    const settings = new SettingsService(db, {
+        bootstrap: bootstrapOf(config),
+        seedValues: appConfigToValues(config),
+    });
+
     const libraries = new Map<string, Library>();
     const context: ServerContext = {
-        config,
+        config: settings.appConfig(),
+        settings,
         auth,
         billing,
         // This suite is about quotas; credits and the market have their own.
@@ -515,15 +524,27 @@ test('admin routes are closed to normal users and open to admins', async () => {
             const owner = await register('owner');
             const guest = await register('guest');
 
-            assert.equal((await fetch(`${base}/api/v1/users`, { headers: bearer(guest.token) })).status, 403);
+            // One namespace, one guard: every admin route answers the same way
+            // to a stranger and to a signed-in non-admin. The point of the
+            // namespace is that this is one check rather than one per route.
+            for (const route of ['/api/v1/admin/users', '/api/v1/admin/settings']) {
+                assert.equal((await fetch(`${base}${route}`)).status, 401, `${route} must reject a stranger`);
+                assert.equal((await fetch(`${base}${route}`, { headers: bearer(guest.token) })).status, 403, `${route} must reject a non-admin`);
+            }
 
-            const list = await fetch(`${base}/api/v1/users`, { headers: bearer(owner.token) });
+            const settings = await fetch(`${base}/api/v1/admin/settings`, { headers: bearer(owner.token) });
+            assert.equal(settings.status, 200);
+            assert.ok((await settings.json() as { entries: { key: string }[] }).entries.length > 0);
+
+            assert.equal((await fetch(`${base}/api/v1/admin/users`, { headers: bearer(guest.token) })).status, 403);
+
+            const list = await fetch(`${base}/api/v1/admin/users`, { headers: bearer(owner.token) });
             assert.equal(list.status, 200);
             const users = (await list.json() as { users: { handle: string; usage: unknown }[] }).users;
             assert.deepEqual(users.map((entry) => entry.handle), ['owner', 'guest']);
             assert.ok(users[0]?.usage);
 
-            const quota = await fetch(`${base}/api/v1/users/${guest.user.id}/quota`, {
+            const quota = await fetch(`${base}/api/v1/admin/users/${guest.user.id}/quota`, {
                 method: 'PUT',
                 headers: bearer(owner.token),
                 body: JSON.stringify({ dailyTokenLimit: 42, monthlyTokenLimit: 43, maxTokensPerRequest: 44 }),
@@ -563,7 +584,7 @@ test('the status route disables and re-enables an account', async () => {
             const owner = await register('owner');
             const guest = await register('guest');
 
-            const disable = await fetch(`${base}/api/v1/users/${guest.user.id}/status`, {
+            const disable = await fetch(`${base}/api/v1/admin/users/${guest.user.id}/status`, {
                 method: 'PUT',
                 headers: bearer(owner.token),
                 body: JSON.stringify({ status: 'disabled' }),
@@ -571,7 +592,7 @@ test('the status route disables and re-enables an account', async () => {
             assert.equal(disable.status, 200);
             assert.equal((await fetch(`${base}/api/v1/me`, { headers: bearer(guest.token) })).status, 401);
 
-            const enable = await fetch(`${base}/api/v1/users/${guest.user.id}/status`, {
+            const enable = await fetch(`${base}/api/v1/admin/users/${guest.user.id}/status`, {
                 method: 'PUT',
                 headers: bearer(owner.token),
                 body: JSON.stringify({ status: 'active' }),

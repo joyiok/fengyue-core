@@ -131,6 +131,20 @@ button, input, textarea, select { font: inherit; color: inherit; }
 
 .rail-spacer { flex: 1 1 auto; min-height: 20px; }
 
+/* The operator block sits apart from the things you do as a user. */
+.rail-divider {
+    border-top: 1px solid var(--line-soft);
+    margin: 14px 10px 8px;
+}
+
+.rail-label {
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    padding: 0 10px 6px;
+}
+
 .rail-user {
     border-top: 1px solid var(--line-soft);
     padding: 14px 10px 2px;
