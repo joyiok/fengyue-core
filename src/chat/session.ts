@@ -22,7 +22,7 @@ import { estimateMessagesTokens } from '../prompt/estimate.ts';
 import type { CompletionUsage, ModelConfig, SamplingOverrides, UsageSource } from '../gateway/types.ts';
 import { ModelError } from '../gateway/types.ts';
 import type { Library } from '../library.ts';
-import type { Worldbook } from '../worldbooks/types.ts';
+import type { Worldbook, WorldbookEntry } from '../worldbooks/types.ts';
 import { assemblePrompt } from '../prompt/assemble.ts';
 import {
     EMPTY_MEMORY,
@@ -47,6 +47,11 @@ export interface SessionOptions {
     worldbookIds?: string[];
     /** Rolling summary memory. */
     memory?: MemoryConfig;
+    /**
+     * Entries loaded mods contribute to the world book scan. Tagged by the
+     * caller with the mod's id, so `sticky` state cannot collide across mods.
+     */
+    extraEntries?: Record<string, WorldbookEntry>;
 }
 
 export interface CreateSessionOptions extends SessionOptions {
@@ -202,6 +207,7 @@ export class ChatSession {
         }
 
         const worldbook = await library.resolveWorldbooks(card, options.worldbookIds);
+        const withMods = mergeEntries(worldbook, options.extraEntries);
 
         const session = new ChatSession(
             library,
@@ -211,7 +217,7 @@ export class ChatSession {
             options,
             log,
             { story: { greetingIndex, personaName: options.personaName } },
-            worldbook,
+            withMods,
             {},
             { ...EMPTY_MEMORY },
         );
@@ -580,3 +586,18 @@ export class ChatSession {
 }
 
 export { ModelError };
+
+/** Fold a loaded mod's entries into the same scan as the card's own books. */
+function mergeEntries(
+    worldbook: Worldbook | null,
+    extra: Record<string, WorldbookEntry> | undefined,
+): Worldbook | null {
+    if (extra === undefined || Object.keys(extra).length === 0) {
+        return worldbook;
+    }
+
+    return {
+        ...(worldbook ?? { entries: {} }),
+        entries: { ...(worldbook?.entries ?? {}), ...extra },
+    };
+}

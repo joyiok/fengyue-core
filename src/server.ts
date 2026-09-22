@@ -24,6 +24,7 @@ import { Database } from './db/database.ts';
 import { ModelError, describeModelConfig, type ModelConfig } from './gateway/types.ts';
 import { Library } from './library.ts';
 import { MarketError, MarketService, type MarketSort, type RankingWindow } from './market/service.ts';
+import { ModsService, ModError } from './mods/service.ts';
 import { SettingsService } from './settings/service.ts';
 
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
@@ -209,6 +210,8 @@ export interface ServerContext {
     credits: CreditService | null;
     /** Null in single-user mode. Gated per request by `config.marketEnabled`. */
     market: MarketService | null;
+    /** Mods are content a player loads onto a work. Null in single-user mode. */
+    mods?: ModsService | null;
     libraryFor: (userId: string) => Library | Promise<Library>;
 }
 
@@ -223,6 +226,7 @@ export interface ServerOptions {
 export function singleUserContext(library: Library, config: AppConfig = loadAppConfig({ STORY_AUTH: 'off' })): ServerContext {
     return {
         settings: null,
+        mods: null,
         config,
         auth: null,
         billing: null,
@@ -291,6 +295,7 @@ export function createAppContext(seed: AppConfig = loadAppConfig()): AppContext 
     // Always built alongside accounts: `market.enabled` is a live gate on the
     // routes, so switching the market off does not need a restart.
     const market = withAccounts ? new MarketService(db) : null;
+    const mods = withAccounts ? new ModsService(db) : null;
 
     const libraryFor = (userId: string): Library => {
         // Single-user mode points straight at a SillyTavern data directory; with
@@ -319,6 +324,7 @@ export function createAppContext(seed: AppConfig = loadAppConfig()): AppContext 
         billing,
         credits,
         market,
+        mods,
         libraryFor,
         db,
         close: () => db.close(),
@@ -1140,11 +1146,20 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                             personaName?: string;
                             greetingIndex?: number;
                             worldbookIds?: string[];
+                            modIds?: string[];
                         };
 
                         if (typeof body.cardId !== 'string' || body.cardId === '') {
                             return sendJson(response, 400, { error: 'cardId is required' });
                         }
+
+                        // Mod rules are the card's and they are enforced here, not
+                        // by hiding a button: anything that reaches this route goes
+                        // through `resolve`, which knows the four policy tiers.
+                        const card = await library.getCard(body.cardId as string);
+                        const modState = body.modIds === undefined || context.mods === null || context.mods === undefined
+                            ? null
+                            : context.mods.sessionState(card, body.modIds, user?.id ?? context.config.localUserId);
 
                         const created = await ChatSession.create(library, {
                             cardId: body.cardId,
@@ -1153,7 +1168,15 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                             ...(body.name !== undefined ? { name: body.name } : {}),
                             ...(body.greetingIndex !== undefined ? { greetingIndex: body.greetingIndex } : {}),
                             ...(body.worldbookIds !== undefined ? { worldbookIds: body.worldbookIds } : {}),
+                            ...(modState === null ? {} : {
+                                prompt: { mods: modState.payloads },
+                                memory: { ...context.config.memory, ...modState.memory },
+                                extraEntries: modState.entries,
+                            }),
                         });
+                        if (modState !== null) {
+                            context.mods?.countLoad(modState.ids);
+                        }
 
                         return sendJson(response, 201, {
                             cardId: created.cardId,
@@ -1596,6 +1619,10 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                         message: error.message,
                         ...error.details,
                     });
+                }
+
+                if (error instanceof ModError) {
+                    return sendJson(response, error.status, { error: error.code, message: error.message });
                 }
 
                 if (error instanceof MarketError) {
