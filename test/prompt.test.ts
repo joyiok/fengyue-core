@@ -201,3 +201,64 @@ test('a custom main prompt replaces the default but keeps the placeholders worki
     assert.equal(messages[0]?.content.startsWith('你是 林昭，对 小明 说话要客气。'), true);
     assert.equal(messages[0]?.content.includes('你在扮演'), false);
 });
+
+// ------------------------------------------------------------------ mods
+
+test('a mod extends the setting: after the card, before the examples, in order', () => {
+    const card = normalizeCard({
+        spec: 'chara_card_v2',
+        data: {
+            name: '林昭',
+            description: '书店店主。',
+            system_prompt: '保持角色。',
+            first_mes: '来了。',
+        },
+    });
+
+    const plain = assemblePrompt({
+        card,
+        history: [],
+        userMessage: '在吗',
+        options: { personaName: 'User' },
+    });
+
+    const modded = assemblePrompt({
+        card,
+        history: [],
+        userMessage: '在吗',
+        options: {
+            personaName: 'User',
+            mods: [
+                { name: '雨夜', system: '外面在下雨。' },
+                { name: '旧书店', system: '灯是暖的。', postHistory: '不要写旁白。' },
+            ],
+        },
+    });
+
+    // The card's own material is the body of the session and stays on top; a mod
+    // extends the setting rather than overriding it.
+    const system = String(modded.messages[0]?.content);
+    assert.equal(system.indexOf('书店店主') < system.indexOf('保持角色'), false, 'card fields and card system prompt keep their place');
+    assert.equal(system.indexOf('保持角色。') < system.indexOf('外面在下雨。'), true, 'a mod comes after the card');
+    assert.equal(system.indexOf('外面在下雨。') < system.indexOf('灯是暖的。'), true, 'mods go in load order');
+
+    // Every mod that added something is named in the sections, so the debug
+    // panel can say what this turn actually carried.
+    assert.deepEqual(
+        modded.stats.sections.filter((section) => section.startsWith('mod:')),
+        ['mod:雨夜', 'mod:旧书店'],
+    );
+    assert.equal(plain.stats.sections.some((section) => section.startsWith('mod:')), false);
+
+    // A mod's post-history fragment lands in the same slot as the card's — right
+    // before the user's message, which is where a lot of community cards depend
+    // on it being.
+    const postHistory = modded.messages.find((message, index) =>
+        index > 0 && message.role === 'system' && String(message.content).includes('不要写旁白'));
+    assert.ok(postHistory, 'the mod\'s post-history fragment was dropped');
+
+    const last = modded.messages[modded.messages.length - 1];
+    assert.equal(last?.role, 'user');
+    assert.equal(modded.messages[modded.messages.length - 2]?.content, postHistory?.content,
+        'post-history stays glued to the final user message');
+});

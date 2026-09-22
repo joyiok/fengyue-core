@@ -25,6 +25,7 @@ import { EMPTY_MEMORY, type MemoryState } from './memory.ts';
 import {
     DEFAULT_HISTORY_TOKEN_BUDGET,
     DEFAULT_MAIN_PROMPT,
+    type ModPayload,
     type PromptMessage,
     type PromptOptions,
     type PromptStats,
@@ -161,6 +162,7 @@ function buildDefinition(
     mainPrompt: string,
     before: string[],
     after: string[],
+    mods: ModPayload[],
 ): { content: string; sections: string[] } {
     const parts: string[] = [];
     const sections: string[] = [];
@@ -198,6 +200,16 @@ function buildDefinition(
     parts.push(...after);
     if (after.length > 0) {
         sections.push('world_info_after');
+    }
+
+    // Mods last. They are loaded by the player and extend the setting; the
+    // card's own material is the body of this session and stays on top.
+    for (const mod of mods) {
+        const text = (mod.system ?? '').trim();
+        if (text !== '') {
+            parts.push(substituteNames(text, names));
+            sections.push(`mod:${mod.name}`);
+        }
     }
 
     return { content: parts.join('\n\n'), sections };
@@ -264,6 +276,7 @@ export function assemblePrompt(input: AssembleInput): AssembleResult {
         user: options.personaName.trim() === '' ? 'User' : options.personaName.trim(),
     };
 
+    const mods = options.mods ?? [];
     const budget = options.historyTokenBudget ?? DEFAULT_HISTORY_TOKEN_BUDGET;
     const maxMessages = options.maxHistoryMessages ?? DEFAULT_MAX_HISTORY_MESSAGES;
     const includeExamples = options.includeExamples ?? true;
@@ -293,6 +306,7 @@ export function assemblePrompt(input: AssembleInput): AssembleResult {
         options.mainPrompt ?? DEFAULT_MAIN_PROMPT,
         byTarget('before_definition').map((entry) => entry.content),
         byTarget('after_definition').map((entry) => entry.content),
+        mods,
     );
     const selection = selectHistory(liveHistory, budget, maxMessages);
 
@@ -350,7 +364,11 @@ export function assemblePrompt(input: AssembleInput): AssembleResult {
         sections.push('world_info_after_history');
     }
 
-    const postHistory = (card.data.post_history_instructions ?? '').trim();
+    const postHistory = [
+        (card.data.post_history_instructions ?? '').trim(),
+        ...mods.map((mod) => (mod.postHistory ?? '').trim()).filter((text) => text !== ''),
+    ].filter((text) => text !== '').join('\n\n');
+
     if (postHistory !== '') {
         messages.push({ role: 'system', content: substituteNames(postHistory, names) });
         sections.push('post_history_instructions');

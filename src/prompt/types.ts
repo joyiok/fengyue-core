@@ -32,6 +32,21 @@ export interface PromptOptions {
     /** Cards with huge example blocks can opt out. */
     includeExamples?: boolean;
     worldInfo?: WorldInfoConfig;
+    /**
+     * Mods loaded onto this session. A mod is content, not a plugin: it adds to
+     * the prompt. They are appended after the card's own material and before the
+     * examples, in load order — a mod extends the setting, it does not override
+     * the card.
+     */
+    mods?: ModPayload[];
+}
+
+export interface ModPayload {
+    name: string;
+    /** Appended to the first system message. */
+    system?: string;
+    /** Appended to the post-history instruction. */
+    postHistory?: string;
 }
 
 /** One world info entry that fired, trimmed for transport. */
