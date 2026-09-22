@@ -89,10 +89,21 @@ export function SettingsPanel(): React.JSX.Element {
         return entry.secret ? '' : String(entry.value);
     };
 
-    /** Only the keys that were actually touched — a save never writes the rest. */
-    const changed = (): Record<string, string> => {
+    /**
+     * Only the keys actually touched in one group.
+     *
+     * Saved per card rather than per page: with eight groups the single button
+     * at the bottom meant scrolling down and hoping you remembered which of the
+     * 26 values you had just changed. Each card commits what is in front of you.
+     */
+    const changedIn = (group: SettingEntry['group']): Record<string, string> => {
         const payload: Record<string, string> = {};
+
         for (const entry of entries ?? []) {
+            if (entry.group !== group) {
+                continue;
+            }
+
             const typed = drafts[entry.key];
             if (typed === undefined) {
                 continue;
@@ -105,13 +116,13 @@ export function SettingsPanel(): React.JSX.Element {
             }
             payload[entry.key] = typed;
         }
+
         return payload;
     };
 
-    const save = async (): Promise<void> => {
-        const payload = changed();
+    const save = async (group: SettingEntry['group']): Promise<void> => {
+        const payload = changedIn(group);
         if (Object.keys(payload).length === 0) {
-            setNote('没有改动。');
             return;
         }
 
@@ -132,6 +143,19 @@ export function SettingsPanel(): React.JSX.Element {
         }
     };
 
+    /** Give up on the edits in one card without touching the others. */
+    const discard = (group: SettingEntry['group']): void => {
+        setDrafts((current) => {
+            const next = { ...current };
+            for (const entry of entries ?? []) {
+                if (entry.group === group) {
+                    delete next[entry.key];
+                }
+            }
+            return next;
+        });
+    };
+
     const reset = async (key: string): Promise<void> => {
         setBusy(true);
         setError(null);
@@ -150,16 +174,16 @@ export function SettingsPanel(): React.JSX.Element {
         return <div className="loading">正在载入设置…</div>;
     }
 
-    const pending = Object.keys(changed()).length > 0;
+    const pendingIn = (group: SettingEntry['group']): number => Object.keys(changedIn(group)).length;
 
     return (
-        <>
-            {error !== null ? <div style={{ marginBottom: 12 }}><Notice kind="error">{error}</Notice></div> : null}
-            {note !== null ? <div style={{ marginBottom: 12 }}><Notice kind="ok">{note}</Notice></div> : null}
+        <div className="stack">
+            {error !== null ? <Notice kind="error">{error}</Notice> : null}
+            {note !== null ? <Notice kind="ok">{note}</Notice> : null}
 
-            <div className="notice" style={{ marginBottom: 14 }}>
-                这些值存在数据库里，改完即生效（标注「重启」的除外）。环境变量只在某个键还没有值时
-                填一次，之后不再读取——所以它们不是你以后要维护的东西。
+            <div className="notice">
+                这些值存在数据库里，<b>每张卡片各自保存</b>，改完即生效（标注「重启」的除外）。
+                环境变量只在某个键还没有值时填一次，之后不再读取——所以它们不是你以后要维护的东西。
             </div>
 
             {GROUPS.map(([group, title]) => {
@@ -167,6 +191,8 @@ export function SettingsPanel(): React.JSX.Element {
                 if (rows.length === 0) {
                     return null;
                 }
+
+                const pending = pendingIn(group);
 
                 return (
                     <div className="panel" key={group}>
@@ -214,15 +240,29 @@ export function SettingsPanel(): React.JSX.Element {
                                 </span>
                             </div>
                         ))}
+
+                        {/* Each card commits what is in front of you. One button at
+                            the bottom of eight groups meant scrolling down and
+                            hoping you remembered which of the 26 values you had
+                            just touched. */}
+                        <div className="row row-end" style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid var(--line-soft)' }}>
+                            {pending === 0 ? (
+                                <span style={{ fontSize: 12, color: 'var(--text-faint)' }}>这一组没有改动</span>
+                            ) : (
+                                <>
+                                    <span style={{ fontSize: 12, color: 'var(--lamp-bright)' }}>{pending} 项改动未保存</span>
+                                    <button type="button" className="btn btn-quiet btn-sm" disabled={busy} onClick={() => discard(group)}>
+                                        放弃
+                                    </button>
+                                    <button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={() => void save(group)}>
+                                        {busy ? '保存中…' : '保存这一组'}
+                                    </button>
+                                </>
+                            )}
+                        </div>
                     </div>
                 );
             })}
-
-            <div className="row row-end" style={{ marginTop: 16 }}>
-                <button type="button" className="btn btn-primary" disabled={busy || !pending} onClick={() => void save()}>
-                    {busy ? '保存中…' : pending ? '保存改动' : '没有改动'}
-                </button>
-            </div>
-        </>
+        </div>
     );
 }
