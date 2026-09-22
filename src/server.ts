@@ -26,6 +26,7 @@ import { Library } from './library.ts';
 import { MarketError, MarketService, type MarketSort, type RankingWindow } from './market/service.ts';
 import { ModsService, ModError } from './mods/service.ts';
 import { SettingsService } from './settings/service.ts';
+import { VersionError, VersionsService } from './versions/service.ts';
 
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const SESSION_COOKIE = 'story_session';
@@ -212,6 +213,7 @@ export interface ServerContext {
     market: MarketService | null;
     /** Mods are content a player loads onto a work. Null in single-user mode. */
     mods?: ModsService | null;
+    versions?: VersionsService | null;
     libraryFor: (userId: string) => Library | Promise<Library>;
 }
 
@@ -227,6 +229,7 @@ export function singleUserContext(library: Library, config: AppConfig = loadAppC
     return {
         settings: null,
         mods: null,
+        versions: null,
         config,
         auth: null,
         billing: null,
@@ -296,6 +299,7 @@ export function createAppContext(seed: AppConfig = loadAppConfig()): AppContext 
     // routes, so switching the market off does not need a restart.
     const market = withAccounts ? new MarketService(db) : null;
     const mods = withAccounts ? new ModsService(db) : null;
+    const versions = withAccounts ? new VersionsService(db) : new VersionsService(db);
 
     const libraryFor = (userId: string): Library => {
         // Single-user mode points straight at a SillyTavern data directory; with
@@ -325,6 +329,7 @@ export function createAppContext(seed: AppConfig = loadAppConfig()): AppContext 
         credits,
         market,
         mods,
+        versions,
         libraryFor,
         db,
         close: () => db.close(),
@@ -1097,6 +1102,70 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                         return sendJson(response, 200, await library.getCard(id));
                     }
 
+                    // Released versions of one work. The bytes are PNGs like the
+                    // working copy (a version has to be exportable); the metadata
+                    // is what the author wrote about them.
+                    if (id !== undefined && sub === 'versions') {
+                        const versions = context.versions;
+                        const owner = user?.id ?? context.config.localUserId;
+                        if (versions === null || versions === undefined) {
+                            return sendJson(response, 400, { error: 'versions_disabled' });
+                        }
+
+                        if (method === 'GET' && subId === undefined) {
+                            return sendJson(response, 200, {
+                                versions: versions.list(owner, id),
+                                primary: versions.primaryOf(owner, id),
+                            });
+                        }
+
+                        if (method === 'POST' && subId === undefined) {
+                            const body = JSON.parse((await readBody(request)).toString('utf8') || '{}') as {
+                                version?: unknown; label?: unknown; note?: unknown;
+                            };
+                            const version = typeof body.version === 'string' && body.version.trim() !== ''
+                                ? body.version.trim()
+                                : new Date().toISOString().replace(/[:.]/g, '-');
+
+                            // Snapshot the working copy: what is released is what
+                            // was saved, not what was in the editor.
+                            const png = await library.exportCardPng(id);
+                            await library.saveVersion(id, version, png);
+
+                            return sendJson(response, 201, {
+                                version: versions.record(owner, id, {
+                                    version,
+                                    ...(typeof body.label === 'string' ? { label: body.label } : {}),
+                                    ...(typeof body.note === 'string' ? { note: body.note } : {}),
+                                }),
+                            });
+                        }
+
+                        // `/characters/:id/versions/:version` — the version is
+                        // `subId`; `subSub` is one segment further along.
+                        if (subId !== undefined) {
+                            const version = subId.replace(/\.png$/i, '');
+
+                            if (method === 'GET') {
+                                return sendBuffer(response, 200, 'image/png', await library.readVersion(id, version));
+                            }
+
+                            if (method === 'DELETE') {
+                                // Refuses while the listing points here; the bytes
+                                // go only once nothing depends on them.
+                                const removed = versions.remove(owner, id, version);
+                                if (removed) {
+                                    await library.deleteVersion(id, version);
+                                }
+                                return sendJson(response, 200, { removed });
+                            }
+                        }
+                    }
+
+                    if (id !== undefined && sub === 'versions') {
+                        return sendJson(response, 404, { error: 'not found', path: url.pathname });
+                    }
+
                     // Submitting snapshots the card into the market listing, so
                     // browsing never reads every user's directory. It does *not*
                     // list it: a submission goes to `pending` and a human looks at
@@ -1207,6 +1276,7 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                             greetingIndex?: number;
                             worldbookIds?: string[];
                             modIds?: string[];
+                            version?: string;
                         };
 
                         if (typeof body.cardId !== 'string' || body.cardId === '') {
@@ -1228,6 +1298,7 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                             ...(body.name !== undefined ? { name: body.name } : {}),
                             ...(body.greetingIndex !== undefined ? { greetingIndex: body.greetingIndex } : {}),
                             ...(body.worldbookIds !== undefined ? { worldbookIds: body.worldbookIds } : {}),
+                            ...(body.version !== undefined ? { version: String(body.version) } : {}),
                             ...(modState === null ? {} : {
                                 prompt: { mods: modState.payloads },
                                 memory: { ...context.config.memory, ...modState.memory },
@@ -1679,6 +1750,10 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                         message: error.message,
                         ...error.details,
                     });
+                }
+
+                if (error instanceof VersionError) {
+                    return sendJson(response, error.status, { error: error.code, message: error.message });
                 }
 
                 if (error instanceof ModError) {

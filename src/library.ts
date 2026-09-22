@@ -274,6 +274,47 @@ export class Library {
         return { chatsRemoved };
     }
 
+    // -------------------------------------------------------------- versions
+
+    // A released version is a PNG exactly like the working copy, so any version
+    // can be exported, played, or moved to another install. The metadata (what
+    // the author called it, why they made it) lives in `character_versions`.
+    private versionPath(id: string, version: string): string {
+        return safeJoin(this.root, 'versions', assertSafeId(id), `${assertSafeId(version)}.png`);
+    }
+
+    async saveVersion(id: string, version: string, png: Buffer): Promise<void> {
+        const target = this.versionPath(id, version);
+        await mkdir(path.dirname(target), { recursive: true });
+        await writeFile(target, png);
+    }
+
+    async readVersion(id: string, version: string): Promise<Buffer> {
+        return readFile(this.versionPath(id, version));
+    }
+
+    /** Read one released version as a card, so a chat can start on it. */
+    async getVersionCard(id: string, version: string): Promise<CharacterCard> {
+        return cardFromPng(await this.readVersion(id, version));
+    }
+
+    /** Which versions actually have bytes. Metadata alone is not a version. */
+    async listVersions(id: string): Promise<string[]> {
+        try {
+            const names = await readdir(safeJoin(this.root, 'versions', assertSafeId(id)));
+            return names
+                .filter((file) => path.extname(file).toLowerCase() === '.png')
+                .map((file) => path.basename(file, '.png'))
+                .sort();
+        } catch {
+            return [];
+        }
+    }
+
+    async deleteVersion(id: string, version: string): Promise<void> {
+        await unlink(this.versionPath(id, version));
+    }
+
     // ----------------------------------------------------------- world books
 
     async listWorldbooks(): Promise<WorldbookSummary[]> {

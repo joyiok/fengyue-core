@@ -28,6 +28,7 @@ import { MarketService } from '../src/market/service.ts';
 import { createSolidPng, decodePng, isPng } from '../src/png/chunks.ts';
 import { ModsService } from '../src/mods/service.ts';
 import { createServer, type ServerContext } from '../src/server.ts';
+import { VersionsService } from '../src/versions/service.ts';
 import { respondWith, startMockModel } from './helpers/mock-model.ts';
 
 const POLICY: QuotaPolicy = { dailyTokenLimit: 100_000, monthlyTokenLimit: 1_000_000, maxTokensPerRequest: 100 };
@@ -105,6 +106,7 @@ async function withServer(run: (harness: Harness) => Promise<void>): Promise<voi
         credits,
         market,
         mods: new ModsService(db),
+        versions: new VersionsService(db),
         libraryFor: (userId: string): Library => {
             const root = path.join(config.dataRoot, 'users', userId);
             const existing = libraries.get(root) ?? new Library(root);
@@ -557,5 +559,79 @@ test('a card\'s mod policy is enforced at POST /chats, not by hiding a button', 
         });
         const ok = await allowed.text();
         assert.equal(allowed.status, 201, ok);
+    });
+});
+
+test('a released version survives later edits, and the listing pins the primary', async () => {
+    await withServer(async ({ base, register }) => {
+        const owner = await register('owner');
+        await importCard(base, owner.token);
+
+        // Snapshot the working copy as it is now.
+        const made = await fetch(`${base}/api/v1/characters/linzhao/versions`, {
+            method: 'POST',
+            headers: bearer(owner.token),
+            body: JSON.stringify({ version: 'v1', label: '首发', note: '第一版' }),
+        });
+        const text = await made.text();
+        assert.equal(made.status, 201, text);
+        assert.equal((JSON.parse(text) as { version: { version: string } }).version.version, 'v1');
+
+        // Now change the working copy completely.
+        await fetch(`${base}/api/v1/characters/linzhao`, {
+            method: 'PUT',
+            headers: bearer(owner.token),
+            body: JSON.stringify({ data: { description: '完全重写了。' } }),
+        });
+
+        // The released version still says what it said — that is the point of
+        // releasing one instead of just editing.
+        const png = Buffer.from(await (await fetch(`${base}/api/v1/characters/linzhao/versions/v1`, {
+            headers: bearer(owner.token),
+        })).arrayBuffer());
+        assert.equal(isPng(png), true);
+
+        const listed = await (await fetch(`${base}/api/v1/characters/linzhao/versions`, {
+            headers: bearer(owner.token),
+        })).json() as { versions: { version: string; label: string }[]; primary: string | null };
+        assert.deepEqual(listed.versions.map((entry) => entry.version), ['v1']);
+        assert.equal(listed.versions[0]?.label, '首发');
+        assert.equal(listed.primary, null, 'nothing points anywhere until the listing does');
+
+        // Pin the listing to v1 and it becomes undeletable: the listing points
+        // there, and moving a listing silently is how a ranking changes for no
+        // visible reason.
+        await fetch(`${base}/api/v1/characters/linzhao/publish`, {
+            method: 'POST',
+            headers: bearer(owner.token),
+            body: JSON.stringify({ primaryVersion: 'v1' }),
+        });
+        assert.equal((await (await fetch(`${base}/api/v1/characters/linzhao/versions`, {
+            headers: bearer(owner.token),
+        })).json() as { primary: string | null }).primary, 'v1');
+
+        const refused = await fetch(`${base}/api/v1/characters/linzhao/versions/v1`, {
+            method: 'DELETE',
+            headers: bearer(owner.token),
+        });
+        assert.equal(refused.status, 409);
+
+        const again = await fetch(`${base}/api/v1/characters/linzhao/versions`, {
+            method: 'POST',
+            headers: bearer(owner.token),
+            body: JSON.stringify({ version: 'v2', label: '修好了' }),
+        });
+        assert.equal(again.status, 201);
+
+        // Point the listing elsewhere and the old one can go.
+        await fetch(`${base}/api/v1/characters/linzhao/publish`, {
+            method: 'POST',
+            headers: bearer(owner.token),
+            body: JSON.stringify({ primaryVersion: 'v2' }),
+        });
+        assert.equal((await fetch(`${base}/api/v1/characters/linzhao/versions/v1`, {
+            method: 'DELETE',
+            headers: bearer(owner.token),
+        })).status, 200);
     });
 });

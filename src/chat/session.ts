@@ -45,6 +45,8 @@ export interface SessionOptions {
      * (`data.extensions.world`), which is how SillyTavern links them.
      */
     worldbookIds?: string[];
+    /** Start on a released version rather than the working copy. */
+    version?: string;
     /** Rolling summary memory. */
     memory?: MemoryConfig;
     /**
@@ -183,7 +185,11 @@ export class ChatSession {
     }
 
     static async create(library: Library, options: CreateSessionOptions): Promise<ChatSession> {
-        const card = await library.getCard(options.cardId);
+        // A conversation can start on an older release: that is what makes a
+        // version worth having for the player and not only for the author.
+        const card = options.version === undefined
+            ? await library.getCard(options.cardId)
+            : await library.getVersionCard(options.cardId, options.version);
         const name = options.name ?? timestampName();
 
         const existing = await library.listChats(options.cardId);
@@ -216,7 +222,7 @@ export class ChatSession {
             card,
             options,
             log,
-            { story: { greetingIndex, personaName: options.personaName } },
+            { story: { greetingIndex, personaName: options.personaName, ...(options.version === undefined ? {} : { version: options.version }) } },
             withMods,
             {},
             { ...EMPTY_MEMORY },
