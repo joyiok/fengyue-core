@@ -371,6 +371,18 @@ interface Harness {
     close: () => Promise<void>;
 }
 
+
+/** A submission is not listed until somebody approves it. */
+async function approve(base: string, token: string, ownerId: string, characterId: string): Promise<void> {
+    const response = await fetch(`${base}/api/v1/admin/reviews`, {
+        method: 'POST',
+        headers: bearer(token),
+        body: JSON.stringify({ ownerId, characterId, decision: 'approve' }),
+    });
+    const text = await response.text();
+    assert.equal(response.status, 200, text);
+}
+
 async function withServer(
     endpoint: string,
     run: (harness: Harness) => Promise<void>,
@@ -710,7 +722,7 @@ test('publishing, favoriting and importing round-trip through the market', async
 
             // Private until published, and invisible to everyone else.
             const status = await fetch(`${base}/api/v1/characters/linzhao/publish`, { headers: bearer(alice.token) });
-            assert.deepEqual(await status.json(), { published: false, character: null });
+            assert.deepEqual(await status.json(), { status: null, published: false, character: null });
             assert.deepEqual(
                 ((await (await fetch(`${base}/api/v1/market`, { headers: bearer(bob.token) })).json()) as { characters: unknown[] }).characters,
                 [],
@@ -720,10 +732,20 @@ test('publishing, favoriting and importing round-trip through the market', async
                 method: 'POST',
                 headers: bearer(alice.token),
             });
-            const published = await publish.json() as { published: boolean; character: { name: string; stats: { score: number } } };
+            // Submitting is not listing: the response is the submission.
+            const submitted = await publish.json() as { status: string; character: { name: string; stats: { score: number } } };
             assert.equal(publish.status, 201);
-            assert.equal(published.published, true);
-            assert.equal(published.character.name, '林昭');
+            assert.equal(submitted.status, 'pending', 'submitting does not list it');
+            assert.equal(submitted.character.name, '林昭');
+
+            await approve(base, alice.token, alice.user.id, 'linzhao');
+            const now = (await (await fetch(`${base}/api/v1/characters/linzhao/publish`, { headers: bearer(alice.token) })).json()) as {
+                status: string;
+                published: boolean;
+                character: { name: string; stats: { score: number } };
+            };
+            assert.equal(now.published, true);
+            const published = now;
 
             const listing = await (await fetch(`${base}/api/v1/market?sort=new`, { headers: bearer(bob.token) })).json() as
                 { characters: { ownerId: string; characterId: string; favorited: boolean }[] };
@@ -796,7 +818,7 @@ test('publishing, favoriting and importing round-trip through the market', async
                 method: 'DELETE',
                 headers: bearer(alice.token),
             });
-            assert.deepEqual(await unpublish.json(), { published: false, removed: true });
+            assert.deepEqual((await unpublish.json()) as unknown, { withdrawn: true, status: 'withdrawn' });
             assert.equal((await fetch(`${base}/api/v1/market/${alice.user.id}/linzhao`, { headers: bearer(bob.token) })).status, 404);
             assert.deepEqual(
                 ((await (await fetch(`${base}/api/v1/market`, { headers: bearer(bob.token) })).json()) as { characters: unknown[] }).characters,

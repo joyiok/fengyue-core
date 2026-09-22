@@ -56,6 +56,18 @@ interface Harness {
 let MOCK_CALLS = 0;
 const mockCount = (): number => MOCK_CALLS;
 
+
+/** A submission is not listed until somebody approves it. */
+async function approve(base: string, token: string, ownerId: string, characterId: string): Promise<void> {
+    const response = await fetch(`${base}/api/v1/admin/reviews`, {
+        method: 'POST',
+        headers: bearer(token),
+        body: JSON.stringify({ ownerId, characterId, decision: 'approve' }),
+    });
+    const text = await response.text();
+    assert.equal(response.status, 200, text);
+}
+
 async function withServer(run: (harness: Harness) => Promise<void>): Promise<void> {
     const dir = await mkdtemp(path.join(tmpdir(), 'story-editing-'));
     const db = new Database(path.join(dir, 'test.sqlite'));
@@ -398,6 +410,7 @@ test('a published card serves its avatar to anyone who can see the listing', asy
 
         const publish = await fetch(`${base}/api/v1/characters/linzhao/publish`, { method: 'POST', headers: bearer(owner.token) });
         assert.equal(publish.status, 201, await publish.text());
+        await approve(base, owner.token, owner.user.id, 'linzhao');
 
         const image = await fetch(`${base}/api/v1/market/${owner.user.id}/linzhao/card.png`, { headers: bearer(reader.token) });
         assert.equal(image.status, 200);
@@ -429,6 +442,7 @@ test('a published card can be read before it is imported', async () => {
 
         const publish = await fetch(`${base}/api/v1/characters/linzhao/publish`, { method: 'POST', headers: bearer(owner.token) });
         assert.equal(publish.status, 201, await publish.text());
+        await approve(base, owner.token, owner.user.id, 'linzhao');
 
         // A market listing is a snapshot (name, tags, description length) so the
         // grid never reads anyone's directory. Reading the card is what tells a

@@ -624,6 +624,44 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                         });
                     }
 
+                    if (parts[3] === 'reviews') {
+                        const reviewing = context.market;
+                        if (reviewing === null) {
+                            return sendJson(response, 400, { error: 'market_disabled' });
+                        }
+                        const market = reviewing;
+
+                        if (method === 'GET') {
+                            const asked = url.searchParams.get('status');
+                            return sendJson(response, 200, {
+                                reviews: market.reviewQueue(asked === 'all' ? 'all' : 'pending'),
+                            });
+                        }
+
+                        if (method === 'POST') {
+                            const body = JSON.parse((await readBody(request)).toString('utf8') || '{}') as {
+                                ownerId?: unknown;
+                                characterId?: unknown;
+                                decision?: unknown;
+                                note?: unknown;
+                            };
+
+                            if (typeof body.ownerId !== 'string' || typeof body.characterId !== 'string') {
+                                return sendJson(response, 400, { error: 'ownerId and characterId are required' });
+                            }
+
+                            return sendJson(response, 200, {
+                                character: market.review(
+                                    body.ownerId,
+                                    body.characterId,
+                                    user.id,
+                                    body.decision === 'reject' ? 'reject' : 'approve',
+                                    typeof body.note === 'string' ? body.note : '',
+                                ),
+                            });
+                        }
+                    }
+
                     if (parts[3] === 'reports') {
                         const moderation = context.market;
                         if (moderation === null) {
@@ -993,9 +1031,11 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                         return sendJson(response, 200, await library.getCard(id));
                     }
 
-                    // Publishing snapshots the card into the market listing, so
-                    // browsing never reads every user's directory.
-                    if (id !== undefined && sub === 'publish') {
+                    // Submitting snapshots the card into the market listing, so
+                    // browsing never reads every user's directory. It does *not*
+                    // list it: a submission goes to `pending` and a human looks at
+                    // it first.
+                    if (id !== undefined && (sub === 'publish' || sub === 'publish-time')) {
                         if (context.market === null || !context.config.marketEnabled || user === null) {
                             return sendJson(response, 400, {
                                 error: 'market_disabled',
@@ -1003,28 +1043,61 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                             });
                         }
 
-                        if (method === 'GET') {
-                            const published = context.market.isPublic(user.id, id);
+                        const market = context.market;
+
+                        if (method === 'GET' && sub === 'publish') {
+                            if (market.stateOf(user.id, id) === null) {
+                                return sendJson(response, 200, { status: null, published: false, character: null });
+                            }
+
+                            const entry = market.requireEntry(user.id, id);
                             return sendJson(response, 200, {
-                                published,
-                                character: published ? context.market.get(user.id, id, user.id) : null,
+                                status: entry.status,
+                                published: entry.status === 'public',
+                                character: entry,
                             });
                         }
 
-                        if (method === 'POST') {
+                        if (method === 'POST' && sub === 'publish') {
                             const card = await library.getCard(id);
-                            const character = context.market.publish(user.id, id, {
+                            const body = JSON.parse((await readBody(request)).toString('utf8') || '{}') as {
+                                scheduledAt?: unknown;
+                                anonymous?: unknown;
+                                rating?: unknown;
+                                primaryVersion?: unknown;
+                            };
+
+                            const entry = market.submit(user.id, id, {
                                 name: card.data.name,
                                 tags: Array.isArray(card.data.tags) ? card.data.tags : [],
                                 descriptionLength: (card.data.description ?? '').length,
+                            }, {
+                                scheduledAt: typeof body.scheduledAt === 'string' ? body.scheduledAt : null,
+                                anonymous: body.anonymous === true,
+                                ...(typeof body.rating === 'string' ? { rating: body.rating } : {}),
+                                ...(typeof body.primaryVersion === 'string' ? { primaryVersion: body.primaryVersion } : {}),
                             });
-                            return sendJson(response, 201, { published: true, character });
+
+                            return sendJson(response, 201, {
+                                status: entry.status,
+                                submitted: true,
+                                published: entry.status === 'public',
+                                character: entry,
+                            });
                         }
 
-                        if (method === 'DELETE') {
+                        if (method === 'PUT' && sub === 'publish-time') {
+                            const body = JSON.parse((await readBody(request)).toString('utf8') || '{}') as { when?: unknown };
+                            if (typeof body.when !== 'string') {
+                                return sendJson(response, 400, { error: 'when must be an ISO date' });
+                            }
+                            return sendJson(response, 200, { character: market.setPublishTime(user.id, id, body.when) });
+                        }
+
+                        if (method === 'DELETE' && sub === 'publish') {
                             return sendJson(response, 200, {
-                                published: false,
-                                removed: context.market.unpublish(user.id, id),
+                                withdrawn: market.withdraw(user.id, id),
+                                status: market.stateOf(user.id, id),
                             });
                         }
                     }
