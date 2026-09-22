@@ -167,6 +167,45 @@ const MIGRATIONS: Migration[] = [
             )`,
         ],
     },
+    {
+        version: 4,
+        statements: [
+            // Reserved tokens used to live in a Map inside the process. That lost
+            // them on a restart — and a restart in the middle of several
+            // concurrent turns briefly *lowered* the guard the reservation exists
+            // to provide, which is the opposite of what it is for. They are rows
+            // now, with an expiry so a crashed turn cannot hold a quota open
+            // forever.
+            `CREATE TABLE IF NOT EXISTS reservations (
+                id         TEXT PRIMARY KEY,
+                user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                request_id TEXT,
+                tokens     INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            )`,
+            `CREATE INDEX IF NOT EXISTS idx_reservations_user ON reservations(user_id)`,
+            `CREATE INDEX IF NOT EXISTS idx_reservations_expiry ON reservations(expires_at)`,
+            // Moderation: a report against a published character. Deliberately not
+            // a foreign key to users or to the listing — a report has to survive
+            // the account being closed and the card being unpublished, otherwise
+            // resolving one would destroy the record of what was resolved.
+            `CREATE TABLE IF NOT EXISTS character_reports (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_id      TEXT NOT NULL,
+                character_id  TEXT NOT NULL,
+                reporter_id   TEXT NOT NULL,
+                reason        TEXT NOT NULL,
+                status        TEXT NOT NULL DEFAULT 'open',
+                created_at    TEXT NOT NULL,
+                resolved_at   TEXT,
+                resolved_by   TEXT,
+                action        TEXT
+            )`,
+            `CREATE INDEX IF NOT EXISTS idx_reports_status ON character_reports(status)`,
+            `CREATE INDEX IF NOT EXISTS idx_reports_target ON character_reports(owner_id, character_id)`,
+        ],
+    },
 ];
 
 export class Database {

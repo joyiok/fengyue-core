@@ -262,3 +262,25 @@ test('account counts add up to the listing', async () => {
         assert.ok(owner.user.id.length > 0);
     });
 });
+
+test('closing an account frees the handle and leaves the ledger addable', async () => {
+    await withAuth((auth) => {
+        const owner = auth.register({ handle: 'owner', password: 'first-long-password' });
+        const inside = auth.login('owner', 'first-long-password');
+
+        const closed = auth.anonymize(owner.user.id);
+
+        // The account is gone in every way a person can reach it …
+        assert.equal(closed.status, 'disabled');
+        assert.equal(closed.role, 'user', 'closing an admin must also drop the role');
+        assert.equal(closed.handle.startsWith('deleted-'), true);
+        assert.equal(auth.authenticate(inside.token), null);
+        assert.equal(throwsCode(() => auth.login('owner', 'first-long-password')), 'invalid_credentials');
+
+        // … and the handle is free for somebody else, which is the point of not
+        // erasing the row.
+        assert.equal(auth.register({ handle: 'owner', password: 'a-second-long-password' }).user.handle, 'owner');
+
+        assert.equal(throwsCode(() => auth.anonymize('missing')), 'not_found');
+    });
+});

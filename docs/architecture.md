@@ -52,7 +52,7 @@ deploy/          Docker Compose 部署形态
 | 没有 Web 框架 | 路由手写几十行；换来 SSE 路径完全可控（§8） |
 | token 数只能**估算** | 没有目标模型的分词器（§4.4） |
 
-**什么时候该放弃这条原则**：接 PostgreSQL、上 Redis、要模板引擎、要自动生成 OpenAPI。前两个是明确记录在案的扩展点，且都不会波及格式层与提示词层。
+**什么时候该放弃这条原则**：接 PostgreSQL、上 Redis、要模板引擎、要自动生成 OpenAPI。后两者只波及 HTTP 层；前两个不是——见 §9 里对 Postgres 的修正。
 
 ---
 
@@ -250,7 +250,14 @@ SSE 能不能用，取决于四条不变量，任何一条破了都会变成"模
 
 ## 9. 存储与迁移
 
-用 Node 内置的 `node:sqlite`：既有真正的 SQL、事务、索引、唯一约束，又保持零依赖。换 PostgreSQL 是替换 `src/db/database.ts` 这一层的事，不是重写 API。
+用 Node 内置的 `node:sqlite`：既有真正的 SQL、事务、索引、唯一约束，又保持零依赖。
+
+**换 PostgreSQL 不是替换一个文件的事**：`node:sqlite` 的 API 是**同步**的（`prepare().get/all/run`、
+同步的 `transaction(fn)`），而每一个 Postgres 客户端都是**异步**的。真正被依赖的是这个同步的调用形状，
+所以换库等于让 `AuthService` / `BillingService` / `CreditService` / `MarketService` / `SettingsService`
+里每一处碰 SQL 的方法都变成 async，并连带 `server.ts`、`cli.ts` 与全部测试。SQL 与 schema 基本原样搬，
+调用形状不搬。这是「什么时候该放弃零依赖」里的那一条——它同时要求放弃零依赖（引入 `pg`）和同步 API。
+真到要多实例的那天，那是一次重构，不是一个 diff。
 
 迁移是版本化语句列表，每个迁移在自己的事务里跑，`schema_migrations` 记录已应用到哪一版。当前是 **v2**。
 
@@ -335,7 +342,7 @@ SSE 能不能用，取决于四条不变量，任何一条破了都会变成"模
 | 审核、举报、讨论区 | 未做 | 平台功能，见方案文档 §6 |
 | 支付渠道 | 未做 | 积分只有签到/邀请/管理员发放 |
 | 多实例 | 不支持 | 预留表在内存里，要挪 Redis |
-| PostgreSQL | 未接 | 换法见 §9 |
+| PostgreSQL | 未接 | **不是换一个文件**：同步 API → 异步 API 的重构，见 §9 |
 | 按 IP 限流、邮箱验证 | 未做 | 只有一个实例时优先级低 |
 | token 计数 | 估算 | §4.4 |
 | 市场展示 | 快照会过期 | 重新发布刷新 |
@@ -346,6 +353,8 @@ SSE 能不能用，取决于四条不变量，任何一条破了都会变成"模
 ## 13. 接手者从哪开始
 
 - **要做前端**：`GET /` 返回的端点表 + README 的接口清单就是全部契约。第一步接 `POST /auth/register|login`（拿 token）、`GET /characters`（列表）、`POST /chats/:c/:n/messages`（`stream: true` 走 SSE，注意 §8 的四条不变量）。
-- **要上规模**：先换 PostgreSQL（一个文件），再把 `BillingService` 的预留挪到 Redis。这两件事都不会碰格式层与提示词层。
+- **要上规模**：换 PostgreSQL。**这不是「一个文件」**：`node:sqlite` 是同步的、Postgres 客户端是异步的，
+  每个 service 里碰 SQL 的方法都要变 async（详见 §9）。它不会碰格式层与提示词层，但会碰其下的一切。
+  预留已经不需要挪 Redis 了——它现在是 `reservations` 表里的行。
 - **要更像酒馆**：照 §4.3 的偏离表逐条补齐，从 Author's Note 和 `outlet` 开始（它们只影响插入位置，风险最低）。
 - **要记住的一条**：格式层与提示词层是这个项目的资产，其余都是可替换的外壳。改动优先选外壳。

@@ -24,8 +24,13 @@ interface ChatPayload {
     character: string;
     name: string;
     chat: { messages: ChatMessage[] };
+    /** Where this window starts in the full log. */
+    offset: number;
     total: number;
 }
+
+/** How many messages one request pulls. Long chats page backwards from here. */
+const PAGE = 60;
 
 interface Pending {
     user: string;
@@ -53,6 +58,9 @@ export default function ChatPage(): React.JSX.Element {
 
     const [card, setCard] = useState<CharacterCard | null>(null);
     const [messages, setMessages] = useState<ChatMessage[] | null>(null);
+    const [offset, setOffset] = useState(0);
+    const [total, setTotal] = useState(0);
+    const loaded = useRef(0);
     const [pending, setPending] = useState<Pending | null>(null);
     const [draft, setDraft] = useState('');
     const [busy, setBusy] = useState(false);
@@ -66,19 +74,48 @@ export default function ChatPage(): React.JSX.Element {
     const scroller = useRef<HTMLDivElement | null>(null);
     const input = useRef<HTMLTextAreaElement | null>(null);
 
+    /**
+     * Resync the window that is already on screen.
+     *
+     * Always *at least* what the client is showing, so a turn, an edit or a
+     * delete can never silently drop the older pages somebody scrolled to — and
+     * never the whole log either, which is the point of paging.
+     */
     const reload = useCallback(async (): Promise<void> => {
         const [chat, detail] = await Promise.all([
-            get<ChatPayload>(`/chats/${encodeURIComponent(cardId)}/${encodeURIComponent(chatName)}`),
+            get<ChatPayload>(`/chats/${encodeURIComponent(cardId)}/${encodeURIComponent(chatName)}?tail=${Math.max(PAGE, loaded.current + 8)}`),
             get<{ card: CharacterCard }>(`/characters/${encodeURIComponent(cardId)}`).catch(() => null),
         ]);
 
         setMessages(chat.chat.messages);
+        setOffset(chat.offset);
+        setTotal(chat.total);
         setCard(detail?.card ?? null);
     }, [cardId, chatName]);
+
+    /** Walk backwards: the next older window goes on top of what is shown. */
+    const loadOlder = useCallback(async (): Promise<void> => {
+        if (offset <= 0) {
+            return;
+        }
+
+        const from = Math.max(0, offset - PAGE);
+        const page = await get<ChatPayload>(
+            `/chats/${encodeURIComponent(cardId)}/${encodeURIComponent(chatName)}?offset=${from}&limit=${offset - from}`,
+        );
+
+        setMessages((current) => [...page.chat.messages, ...(current ?? [])]);
+        setOffset(page.offset);
+        setTotal(page.total);
+    }, [cardId, chatName, offset]);
 
     useEffect(() => {
         void reload().catch((caught) => setError(caught instanceof Error ? caught.message : String(caught)));
     }, [reload]);
+
+    useEffect(() => {
+        loaded.current = messages?.length ?? 0;
+    }, [messages]);
 
     useEffect(() => {
         scroller.current?.scrollTo({ top: scroller.current.scrollHeight });
@@ -275,6 +312,17 @@ export default function ChatPage(): React.JSX.Element {
 
             <div className="chat-scroll" ref={scroller}>
                 <div className="chat-flow">
+                    {offset > 0 ? (
+                        <div className="row" style={{ justifyContent: 'center' }}>
+                            <button type="button" className="btn btn-sm" onClick={() => void loadOlder()}>
+                                加载更早的 {Math.min(PAGE, offset)} 条
+                            </button>
+                            <span style={{ fontSize: 12, color: 'var(--text-faint)' }}>
+                                共 {total} 条，已载入 {offset}–{total}
+                            </span>
+                        </div>
+                    ) : null}
+
                     {messages === null ? <div className="loading">正在载入…</div> : null}
 
                     {shown.map((message, index) => (

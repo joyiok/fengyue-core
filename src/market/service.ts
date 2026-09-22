@@ -42,6 +42,54 @@ export interface MarketEntry {
     favorited: boolean;
 }
 
+/**
+ * A flag raised against a published character.
+ *
+ * Not a foreign key to `users` or to the listing: a report has to survive the
+ * account being closed and the card being unpublished, or resolving one would
+ * destroy the record of what was resolved.
+ */
+export interface CharacterReport {
+    id: number;
+    ownerId: string;
+    characterId: string;
+    reporterId: string;
+    reason: string;
+    status: 'open' | 'resolved';
+    createdAt: string;
+    resolvedAt: string | null;
+    resolvedBy: string | null;
+    action: string | null;
+}
+
+interface ReportRow {
+    id: number | bigint;
+    owner_id: string;
+    character_id: string;
+    reporter_id: string;
+    reason: string;
+    status: string;
+    created_at: string;
+    resolved_at: string | null;
+    resolved_by: string | null;
+    action: string | null;
+}
+
+function toReport(row: ReportRow): CharacterReport {
+    return {
+        id: Number(row.id),
+        ownerId: row.owner_id,
+        characterId: row.character_id,
+        reporterId: row.reporter_id,
+        reason: row.reason,
+        status: row.status === 'resolved' ? 'resolved' : 'open',
+        createdAt: row.created_at,
+        resolvedAt: row.resolved_at,
+        resolvedBy: row.resolved_by,
+        action: row.action,
+    };
+}
+
 export interface RankingRow {
     rank: number;
     ownerId: string;
@@ -155,6 +203,81 @@ export class MarketService {
         const shares = this.#db.prepare('SELECT COUNT(*) AS n FROM character_shares').get() as { n: number | bigint };
         const favorites = this.#db.prepare('SELECT COUNT(*) AS n FROM character_favorites').get() as { n: number | bigint };
         return { published: Number(shares.n), favorites: Number(favorites.n) };
+    }
+
+    /**
+     * Flag a published character for a human to look at.
+     *
+     * One open report per reporter per character: the button means "this should
+     * be looked at", not a counter that a grudge can inflate.
+     */
+    report(ownerId: string, characterId: string, reporterId: string, reason: string): CharacterReport {
+        const existing = this.#db.prepare(
+            `SELECT * FROM character_reports
+             WHERE owner_id = ? AND character_id = ? AND reporter_id = ? AND status = 'open'`,
+        ).get(ownerId, characterId, reporterId) as ReportRow | undefined;
+
+        if (existing !== undefined) {
+            return toReport(existing);
+        }
+
+        const created = this.#now().toISOString();
+        const result = this.#db.prepare(
+            `INSERT INTO character_reports (owner_id, character_id, reporter_id, reason, status, created_at)
+             VALUES (?, ?, ?, ?, 'open', ?)`,
+        ).run(ownerId, characterId, reporterId, String(reason ?? '').slice(0, 2000), created);
+
+        return {
+            id: Number(result.lastInsertRowid),
+            ownerId,
+            characterId,
+            reporterId,
+            reason: String(reason ?? ''),
+            status: 'open',
+            createdAt: created,
+            resolvedAt: null,
+            resolvedBy: null,
+            action: null,
+        };
+    }
+
+    /** The queue. `open` is what an operator acts on; `resolved` is the record. */
+    reports(status: 'open' | 'resolved' | 'all' = 'open'): CharacterReport[] {
+        const rows = (status === 'all'
+            ? this.#db.prepare('SELECT * FROM character_reports ORDER BY id DESC LIMIT 200').all()
+            : this.#db.prepare('SELECT * FROM character_reports WHERE status = ? ORDER BY id DESC LIMIT 200').all(status)) as unknown as ReportRow[];
+
+        return rows.map(toReport);
+    }
+
+    /**
+     * Resolve one report: dismiss it, or take the listing down.
+     *
+     * Either way the report keeps its record — who raised it, who resolved it,
+     * and what was done. "Resolved" is not "deleted".
+     */
+    resolveReport(
+        reportId: number,
+        moderatorId: string,
+        action: 'dismiss' | 'unpublish',
+    ): { report: CharacterReport; unpublished: boolean } {
+        const row = this.#db.prepare('SELECT * FROM character_reports WHERE id = ?').get(reportId) as ReportRow | undefined;
+        if (row === undefined) {
+            throw new MarketError('not_published', 'no such report', 404);
+        }
+
+        let unpublished = false;
+        if (action === 'unpublish' && row.status === 'open') {
+            unpublished = this.unpublish(row.owner_id, row.character_id);
+        }
+
+        this.#db.prepare(
+            `UPDATE character_reports SET status = 'resolved', resolved_at = ?, resolved_by = ?, action = ?
+             WHERE id = ?`,
+        ).run(this.#now().toISOString(), moderatorId, action, reportId);
+
+        const updated = this.#db.prepare('SELECT * FROM character_reports WHERE id = ?').get(reportId) as unknown as ReportRow;
+        return { report: toReport(updated), unpublished };
     }
 
     isPublic(ownerId: string, characterId: string): boolean {

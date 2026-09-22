@@ -209,6 +209,19 @@ export interface SettingEntry {
     env?: string;
 }
 
+export interface CharacterReport {
+    id: number;
+    ownerId: string;
+    characterId: string;
+    reporterId: string;
+    reason: string;
+    status: 'open' | 'resolved';
+    createdAt: string;
+    resolvedAt: string | null;
+    resolvedBy: string | null;
+    action: string | null;
+}
+
 // ------------------------------------------------------------------- admin
 
 export interface AdminOverview {

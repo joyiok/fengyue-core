@@ -340,3 +340,43 @@ test('one user cannot spend another user budget or see their usage', async () =>
         billing.authorize(secondUserId, { estimatedPromptTokens: 100, requestedMaxTokens: 400 });
     });
 });
+
+// -------------------------------------------------------- where a hold lives
+
+test('a reservation is a row, so a restart cannot lower the guard', async () => {
+    await withBilling(({ billing, db, userId }) => {
+        const held = billing.authorize(userId, { estimatedPromptTokens: 10, requestedMaxTokens: 20 });
+        assert.equal(billing.summary(userId).inFlight.requests, 1);
+
+        // A second service over the same database is what a restart looks like.
+        // Process memory would have forgotten the hold and let a second request
+        // into the space the first is still using — the exact overspend the
+        // reservation exists to prevent.
+        const after = new BillingService(db, { defaultQuota: POLICY, maxConcurrentStreamsPerUser: 1 });
+        assert.equal(after.summary(userId).inFlight.requests, 1);
+        assert.equal(after.summary(userId).inFlight.reservedTokens, 30);
+        assert.throws(
+            () => after.authorize(userId, { estimatedPromptTokens: 1, requestedMaxTokens: 1 }),
+            /too many requests in flight/,
+        );
+
+        after.release(held);
+        assert.equal(after.summary(userId).inFlight.requests, 0);
+        assert.doesNotThrow(() => after.authorize(userId, { estimatedPromptTokens: 1, requestedMaxTokens: 1 }));
+    }, { maxStreams: 1 });
+});
+
+test('an abandoned reservation expires instead of holding a quota open forever', async () => {
+    let clock = new Date('2026-01-01T00:00:00.000Z');
+
+    await withBilling(({ billing, userId }) => {
+        billing.authorize(userId, { estimatedPromptTokens: 10, requestedMaxTokens: 20 });
+        assert.equal(billing.summary(userId).inFlight.requests, 1);
+
+        // A turn that crashed never released its hold. Persistence must not turn
+        // that into a permanent lock-out, so the row has a shelf life.
+        clock = new Date('2026-01-01T00:20:00.000Z');
+        assert.equal(billing.summary(userId).inFlight.requests, 0);
+        assert.equal(billing.summary(userId).inFlight.reservedTokens, 0);
+    }, { maxStreams: 1, now: () => clock });
+});

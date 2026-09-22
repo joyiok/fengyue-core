@@ -171,6 +171,46 @@ export class AuthService {
     }
 
     /**
+     * Close an account without erasing what it cost.
+     *
+     * Both ledgers are append-only so that a balance can always be reconciled
+     * against the rows that produced it — hard-deleting a user would silently
+     * shrink every total the operator reconciles against, which is the one thing
+     * the ledger exists to prevent. So the account is anonymized instead: the
+     * handle is freed, the password becomes unusable, every session goes, and the
+     * library (the actual personal content) is removed by the caller. The ledger
+     * rows stay and still add up.
+     */
+    anonymize(userId: string): User {
+        if (this.get(userId) === null) {
+            throw new AuthError('not_found', 'no such account', 404);
+        }
+
+        // Uniqueness of `handle` is what frees the old one for somebody else.
+        const tombstone = `deleted-${randomUUID().slice(0, 8)}`;
+
+        this.#db.transaction(() => {
+            this.#db.prepare(
+                `UPDATE users SET handle = ?, display_name = ?, password_hash = ?, password_salt = ?,
+                                  role = 'user', status = 'disabled' WHERE id = ?`,
+            ).run(
+                tombstone,
+                '（已注销）',
+                randomBytes(32).toString('base64'),
+                randomBytes(16).toString('base64'),
+                userId,
+            );
+            this.logoutAll(userId);
+        });
+
+        const updated = this.get(userId);
+        if (updated === null) {
+            throw new AuthError('not_found', 'no such account', 404);
+        }
+        return updated;
+    }
+
+    /**
      * Change a password.
      *
      * The current one is required even of the account owner: a live session is

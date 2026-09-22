@@ -409,6 +409,17 @@ export class Library {
         await writeFile(safeJoin(dir, `${assertSafeId(name)}.jsonl`), serializeChatJsonl(chat), 'utf8');
     }
 
+    /**
+     * Remove everything in this library: cards, world books, conversations.
+     *
+     * Used when an account is closed. The ledgers stay — they record what was
+     * spent, and that has to keep adding up — but the content goes, because the
+     * content is the privacy-relevant part.
+     */
+    async destroy(): Promise<void> {
+        await rm(this.root, { recursive: true, force: true });
+    }
+
     async deleteChat(character: string, name: string): Promise<void> {
         await unlink(safeJoin(this.chatsDir, assertSafeId(character), `${assertSafeId(name)}.jsonl`));
     }

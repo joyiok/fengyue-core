@@ -9,8 +9,9 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 
-import { get, post, put } from '@/lib/api';
+import { del, get, post, put } from '@/lib/api';
 import { count } from '@/lib/format';
+import { ConfirmButton } from './ui';
 import type { UsageSummary, User } from '@/lib/types';
 
 type Row = User & { usage: UsageSummary | null };
@@ -84,6 +85,14 @@ export function AdminPanel(): React.JSX.Element {
                                     >
                                         {row.status === 'disabled' ? '启用' : '停用'}
                                     </button>
+                                    <ConfirmButton
+                                        label="注销"
+                                        confirm="注销后头像、角色卡、会话全部删除，且不可恢复。用量与积分流水保留（总数才能对账）。确定？"
+                                        onConfirm={() => run(
+                                            () => del(`/admin/users/${encodeURIComponent(row.id)}`),
+                                            '账号已注销：用户名已释放，会话全部失效，库已删除。',
+                                        )}
+                                    />
                                 </div>
 
                                 {row.usage === null ? null : (

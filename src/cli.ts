@@ -18,7 +18,7 @@
  * Model settings come from story.config.json or the STORY_MODEL_* variables;
  * see story.config.example.json. Without them, only the asset commands work.
  */
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { AuthService } from './auth/service.ts';
@@ -53,6 +53,7 @@ Commands:
 
   user add <handle> <password> [--admin]   create an account
   user passwd <handle> <password>          set a password (revokes every session)
+  user close <handle>                      close an account: free the handle, remove the library
   user list                                accounts with their usage
   user enable|disable <handle>             flip an account's status
   user quota <handle> [--daily N] [--monthly N] [--per-request N]
@@ -485,6 +486,26 @@ async function main(): Promise<number> {
 
                         auth.resetPassword(target.id, newPassword);
                         console.log(`password updated for ${target.handle}; every session was revoked`);
+                        return 0;
+                    }
+
+                    // Close an account: free the handle, make the password
+                    // unusable, revoke the sessions and remove the library. The
+                    // ledgers stay, so every total still reconciles.
+                    case 'close': {
+                        if (!handleArg) usage();
+
+                        const target = auth.findByHandle(handleArg);
+                        if (target === null) {
+                            console.error(`no such account: ${handleArg}`);
+                            return 1;
+                        }
+
+                        auth.anonymize(target.id);
+                        await rm(path.join(appConfig.dataRoot, 'users', target.id), { recursive: true, force: true });
+
+                        console.log(`closed ${handleArg}: handle freed, sessions revoked, library removed`);
+                        console.log('(the usage and credit ledgers are kept so totals still reconcile)');
                         return 0;
                     }
 

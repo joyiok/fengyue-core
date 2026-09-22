@@ -624,6 +624,31 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                         });
                     }
 
+                    if (parts[3] === 'reports') {
+                        const moderation = context.market;
+                        if (moderation === null) {
+                            return sendJson(response, 400, { error: 'market_disabled' });
+                        }
+
+                        const reportId = parts[4] === undefined ? undefined : Number(parts[4]);
+
+                        if (method === 'GET' && reportId === undefined) {
+                            const asked = url.searchParams.get('status');
+                            const status = asked === 'resolved' || asked === 'all' ? asked : 'open';
+                            return sendJson(response, 200, { reports: moderation.reports(status) });
+                        }
+
+                        if (method === 'POST' && reportId !== undefined && parts[5] === 'resolve') {
+                            if (!Number.isInteger(reportId)) {
+                                return sendJson(response, 400, { error: 'report id must be an integer' });
+                            }
+
+                            const body = JSON.parse((await readBody(request)).toString('utf8') || '{}') as { action?: unknown };
+                            const action = body.action === 'unpublish' ? 'unpublish' as const : 'dismiss' as const;
+                            return sendJson(response, 200, moderation.resolveReport(reportId, user.id, action));
+                        }
+                    }
+
                     if (parts[3] === 'users') {
                         const targetId = parts[4] ? decodeURIComponent(parts[4]) : undefined;
 
@@ -635,7 +660,24 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                             return sendJson(response, 200, { users });
                         }
 
-                        if (method === 'PUT' && targetId !== undefined && parts[5] === 'quota') {
+                        // Close an account. Anonymize rather than erase: the ledgers
+                    // are append-only so totals keep reconciling, while the
+                    // handle, the password and the library (the personal content)
+                    // are what actually go.
+                    if (method === 'DELETE' && targetId !== undefined && parts[5] === undefined) {
+                        if (targetId === user.id) {
+                            return sendJson(response, 400, {
+                                error: 'self_close',
+                                message: 'close this account from a different admin account',
+                            });
+                        }
+
+                        const updated = (context.auth as AuthService).anonymize(targetId);
+                        await (await context.libraryFor(targetId)).destroy();
+                        return sendJson(response, 200, { user: updated, closed: true, ledgersKept: true });
+                    }
+
+                    if (method === 'PUT' && targetId !== undefined && parts[5] === 'quota') {
                             const body = JSON.parse((await readBody(request)).toString('utf8') || '{}') as Record<string, unknown>;
                             const pick = (key: string, fallback: number): number => {
                                 const value = Number(body[key] ?? fallback);
@@ -837,6 +879,28 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                     // Import copies the card into the caller's own library. The card's
                     // embedded world book travels with the PNG, so the copy works
                     // without reaching back into the publisher's files.
+                    // Flag a listing for a human. Deliberately thin: it records
+                    // that somebody thinks this is wrong and should be looked at.
+                    // Hiding things automatically on a count is how a grudge
+                    // becomes a takedown.
+                    if (method === 'POST' && ownerId !== undefined && characterId !== undefined && subId === 'report') {
+                        if (user === null) {
+                            return sendJson(response, 400, { error: 'auth_disabled', message: 'reporting needs an account' });
+                        }
+
+                        if (market.get(ownerId, characterId, user.id) === null) {
+                            return sendJson(response, 404, { error: 'not_published', message: 'no such published character' });
+                        }
+
+                        const body = JSON.parse((await readBody(request)).toString('utf8') || '{}') as { reason?: unknown };
+                        const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
+                        if (reason === '') {
+                            return sendJson(response, 400, { error: 'reason is required' });
+                        }
+
+                        return sendJson(response, 201, { report: market.report(ownerId, characterId, user.id, reason) });
+                    }
+
                     if (method === 'POST' && ownerId !== undefined && characterId !== undefined && subId === 'import') {
                         if (user === null) {
                             return sendJson(response, 400, { error: 'auth_disabled', message: 'importing needs an account' });
@@ -1032,22 +1096,44 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                     // Read one chat: `/chats/<card>/<chat>`. The name lives in `sub`;
                     // `subId` is only used by the sub-routes (messages, regenerate,
                     // summarize), so requiring it here made this route unreachable.
-                    // Read one chat. Long logs can be paged with `?offset=&limit=`;
-                    // with neither, the whole log comes back, which is what a client
-                    // restoring a session after a refresh wants.
+                    // Read one chat. Three ways in, because a client opening a
+                    // long conversation and a client restoring one want different
+                    // things:
+                    //
+                    //   `?tail=N`      the last N — what you open a chat to read
+                    //   `?offset=&limit=`  a window from the start — how you then
+                    //                  walk backwards through the older ones
+                    //   neither        the whole log — what a refresh restores
+                    //
+                    // `offset` is echoed back so the caller knows where its window
+                    // starts in the full log.
                     if (method === 'GET' && id !== undefined && sub !== undefined && subId === undefined) {
                         const chat = await library.getChat(id, sub);
                         const total = chat.messages.length;
-                        const offset = Math.max(0, Math.trunc(Number(url.searchParams.get('offset') ?? 0)) || 0);
+
+                        const tailParam = url.searchParams.get('tail');
+                        const offsetParam = url.searchParams.get('offset');
                         const limitParam = url.searchParams.get('limit');
-                        const limit = limitParam === null
-                            ? Math.max(0, total - offset)
-                            : Math.max(0, Math.trunc(Number(limitParam)) || 0);
+
+                        let offset = 0;
+                        let limit = total;
+
+                        if (tailParam !== null) {
+                            const tail = Math.max(0, Math.trunc(Number(tailParam)) || 0);
+                            offset = Math.max(0, total - tail);
+                            limit = total - offset;
+                        } else if (offsetParam !== null || limitParam !== null) {
+                            offset = Math.max(0, Math.trunc(Number(offsetParam ?? 0)) || 0);
+                            limit = limitParam === null
+                                ? Math.max(0, total - offset)
+                                : Math.max(0, Math.trunc(Number(limitParam)) || 0);
+                        }
 
                         return sendJson(response, 200, {
                             character: id,
                             name: sub,
                             chat: { ...chat, messages: chat.messages.slice(offset, offset + limit) },
+                            offset,
                             total,
                         });
                     }

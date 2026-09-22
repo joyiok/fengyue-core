@@ -122,7 +122,14 @@ $ node src/cli.ts preview default_Seraphina "What is Eldoria?"
 
 做产品必须先有这块：没有额度，公网多用户会直接烧穿账单且拦不住。
 
-**存储用的是 Node 内置的 `node:sqlite`**（无需 flag，只有一条实验性告警，npm 脚本里已抑制）。这样 M4 拿到了真正的 SQL、事务、索引与唯一约束，同时**保持运行时零依赖**；换 PostgreSQL 是替换 `src/db/database.ts` 这一层的事，不是重写 API。
+**存储用的是 Node 内置的 `node:sqlite`**（无需 flag，只有一条实验性告警，npm 脚本里已抑制）。这样 M4 拿到了真正的 SQL、事务、索引与唯一约束，同时**保持运行时零依赖**。
+
+**换 PostgreSQL 不是替换一个文件的事**：`node:sqlite` 的 API 是**同步**的（`prepare().get/all/run`、
+同步的 `transaction(fn)`），而每一个 Postgres 客户端都是**异步**的。真正被依赖的是这个同步的调用形状，
+所以换库等于让 `AuthService` / `BillingService` / `CreditService` / `MarketService` / `SettingsService`
+里每一处碰 SQL 的方法都变成 async，并连带 `server.ts`、`cli.ts` 与全部测试。SQL 与 schema 基本原样搬，
+调用形状不搬。这是「什么时候该放弃零依赖」里的那一条——它同时要求放弃零依赖（引入 `pg`）和同步 API。
+真到要多实例的那天，那是一次重构，不是一个 diff。
 
 **两条规矩**，写在 `src/billing/service.ts` 顶部也写在测试里：
 
@@ -337,6 +344,7 @@ POST   /api/v1/admin/users/:id/credits         管理员加积分 {"amount":N,"r
 
 GET    /api/v1/market?q=&tag=&sort=hot|new|name&limit=&offset=
 GET    /api/v1/market/:ownerId/:characterId    详情（非本人浏览会计一次浏览）
+POST   /api/v1/market/:ownerId/:characterId/report   举报 {"reason":"…"}（每人每角色只有一条未处理的）
 POST   /api/v1/market/:ownerId/:characterId/favorite   {"favorited":true|false}
 POST   /api/v1/market/:ownerId/:characterId/import     复制进自己的库
 GET    /api/v1/rankings?window=day|week|month|all&limit=
@@ -361,6 +369,9 @@ DELETE /api/v1/chats/:cardId/:chatName         删一个会话
 PATCH  /api/v1/chats/:cardId/:chatName/messages/:index  改一条消息的内容（日志编辑，不调模型）
 DELETE /api/v1/chats/:cardId/:chatName/messages/:index  删一条消息
 GET    /api/v1/admin/overview               概览：模型是否配好、账号数、今日/本月用量、积分、市场
+GET    /api/v1/admin/reports?status=        举报队列（open / resolved / all）
+POST   /api/v1/admin/reports/:id/resolve    处理 {"action":"dismiss"|"unpublish"}（记录保留）
+DELETE /api/v1/admin/users/:id              注销账号：释放用户名、删除库；**账本保留**（总数才能对账）
 GET    /api/v1/admin/settings               全部配置（密钥打码）
 PUT    /api/v1/admin/settings               改配置 {"model.name":"…"}
 POST   /api/v1/admin/settings/reset         改回启动值 {"keys":["…"]}
@@ -369,8 +380,9 @@ PUT    /api/v1/admin/users/:id/quota          改限额
 PUT    /api/v1/admin/users/:id/status         启用/停用
 ```
 
-`GET /api/v1/chats/:cardId/:chatName` 带 `?offset=&limit=` 可以分页（都不给就是整份，
-响应里的 `total` 始终是全量长度）。
+`GET /api/v1/chats/:cardId/:chatName` 三种读法：`?tail=N` 拿最后 N 条（打开会话就是看这个）、
+`?offset=&limit=` 从头取一个窗口（往回翻旧消息）、都不给是整份（刷新恢复）。响应里的 `offset`
+是这个窗口在整份日志里的起点，`total` 始终是全量长度。
 
 改一条消息是**日志编辑**（`PATCH …/messages/:index`）：不调模型、不计费。而「换一种说法」
 是另一件事：用 `regenerate` 带 `message`，它改的是最后那条回答**在回答谁**，并且把被替换的
@@ -494,7 +506,7 @@ scripts/          与酒馆的互操作验收脚本
 
 M0–M6 与网页客户端都已完成。按 `docs/product-backend-plan.md` §8，接下来不是再加功能，而是把它推到能被真实用户使用的位置：
 
-- **规模**：预留表在内存里（多实例要挪到 Redis）；SQLite 换 Postgres 只需替换 `src/db/database.ts`；榜单已经是按天聚合的，日均增长与角色数同阶而不是与浏览量同阶。
+- **规模**：预留已经在数据库里（带过期，崩溃不会把额度一直占着）；榜单已经是按天聚合的，日均增长与角色数同阶而不是与浏览量同阶。SQLite 换 Postgres 的真实代价见上文——那是一次重构。
 - **合规**：商业化 + NSFW 涉及支付与内容合规，技术方案之外，自行评估。
 
 **M6 明确未做**：审核/举报、真实支付、讨论区。**网页客户端明确未做**：世界书的分组评分
@@ -510,5 +522,6 @@ primary world，没有“一本都不要”这个表达）。
 - **环境变量只剩「数据在哪」**：`STORY_DB`（SQLite 文件）、`STORY_DATA_ROOT`（用户库的根）、`STORY_LIBRARY_ROOT`（CLI 单用户模式直接指向某个库）。其余一切——模型网关、额度、积分、市场、摘要、注册开关、会话时长、监听地址端口——都是 `settings` 表里的一行
 - **环境变量只在某个键还没有值时填一次**，之后不再读取。所以改 `.env` 对已经在跑的实例没有影响，这正是目的：要改就改数据库（网页端或 `cli.ts settings set`），不用重启
 - `auth.enabled` / `server.host` / `server.port` 是启动时读一次的，改它们要重启，界面上标了「重启」
-- `node:sqlite` 是实验特性，换 Postgres 时只需替换 `src/db/database.ts`；预留表在内存里，多实例要挪到 Redis
+- `node:sqlite` 是实验特性。**换 Postgres 是一次重构而不是一个 diff**（同步 API → 异步 API，见上文）；
+  预留是 `reservations` 表里的行（带 `expires_at`），重启不会让并发保护失效
 - 直接对酒馆的数据目录写入前请先备份（读是安全的）

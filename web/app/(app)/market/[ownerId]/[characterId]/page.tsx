@@ -27,6 +27,9 @@ export default function MarketDetailPage(): React.JSX.Element {
     const [card, setCard] = useState<CharacterCard | null>(null);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [reporting, setReporting] = useState(false);
+    const [reason, setReason] = useState('');
+    const [note, setNote] = useState<string | null>(null);
 
     const base = `/market/${encodeURIComponent(ownerId)}/${encodeURIComponent(characterId)}`;
 
@@ -52,6 +55,18 @@ export default function MarketDetailPage(): React.JSX.Element {
         try {
             const result = await post<{ favorited: boolean; favorites: number }>(`${base}/favorite`, { favorited: !entry.favorited });
             setEntry({ ...entry, favorited: result.favorited, stats: { ...entry.stats, favorites: result.favorites } });
+        } catch (caught) {
+            setError(caught instanceof Error ? caught.message : String(caught));
+        }
+    };
+
+    /** Flag it for a human. There is no automatic takedown on a count. */
+    const report = async (): Promise<void> => {
+        try {
+            await post(`${base}/report`, { reason: reason.trim() });
+            setReporting(false);
+            setReason('');
+            setNote('已提交，管理员会看到。');
         } catch (caught) {
             setError(caught instanceof Error ? caught.message : String(caught));
         }
@@ -109,10 +124,41 @@ export default function MarketDetailPage(): React.JSX.Element {
                     <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void importCard()}>
                         {busy ? '导入中…' : '导入到我的库'}
                     </button>
+                    <button type="button" className="btn btn-quiet btn-sm" onClick={() => setReporting((open) => !open)}>
+                        举报
+                    </button>
                 </div>
             </div>
 
             {error !== null ? <Notice kind="error">{error}</Notice> : null}
+            {note !== null ? <Notice kind="ok">{note}</Notice> : null}
+
+            {reporting ? (
+                <div className="panel" style={{ marginTop: 14 }}>
+                    <div className="field" style={{ marginBottom: 12 }}>
+                        <label htmlFor="report-reason">这条哪里不对？</label>
+                        <textarea
+                            id="report-reason"
+                            className="textarea"
+                            rows={3}
+                            value={reason}
+                            placeholder="写清楚一点，处理的人只看得到这段话。"
+                            onChange={(event) => setReason(event.target.value)}
+                        />
+                    </div>
+                    <div className="row row-end">
+                        <button type="button" className="btn btn-quiet btn-sm" onClick={() => setReporting(false)}>取消</button>
+                        <button
+                            type="button"
+                            className="btn btn-primary btn-sm"
+                            disabled={reason.trim() === ''}
+                            onClick={() => void report()}
+                        >
+                            提交给管理员
+                        </button>
+                    </div>
+                </div>
+            ) : null}
 
             <div className="panel">
                 <TagList tags={entry.tags} max={12} />

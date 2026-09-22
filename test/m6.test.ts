@@ -874,3 +874,59 @@ test('a chat name containing spaces and CJK survives the URL', async () => {
         await mock.close();
     }
 });
+
+// ----------------------------------------------------------------- moderation
+
+test('a report is recorded, and resolving one is not the same as deleting it', async () => {
+    await withDb((db) => {
+        const auth = new AuthService(db, { kdf: FAST_KDF });
+        const market = new MarketService(db);
+        const owner = auth.register({ handle: 'owner', password: PASSWORD }).user.id;
+        const reader = auth.register({ handle: 'reader', password: PASSWORD }).user.id;
+
+        market.publish(owner, 'linzhao', { name: '林昭', tags: ['现代'], descriptionLength: 4 });
+
+        const first = market.report(owner, 'linzhao', reader, '这张卡里有别人的真实信息');
+        assert.equal(first.status, 'open');
+
+        // The button means "look at this", not a counter a grudge can inflate.
+        const again = market.report(owner, 'linzhao', reader, '再说一次');
+        assert.equal(again.id, first.id, 'a second open report from the same person is the same one');
+        assert.equal(market.reports('open').length, 1);
+
+        const other = auth.register({ handle: 'other', password: PASSWORD }).user.id;
+        market.report(owner, 'linzhao', other, '也不合适');
+        assert.equal(market.reports('open').length, 2);
+
+        // Taking it down resolves every open report against it and keeps the
+        // record of who said what and who decided.
+        const resolved = market.resolveReport(first.id, owner, 'unpublish');
+        assert.equal(resolved.unpublished, true);
+        assert.equal(market.isPublic(owner, 'linzhao'), false);
+
+        const kept = market.reports('all').find((report) => report.id === first.id);
+        assert.equal(kept?.status, 'resolved');
+        assert.equal(kept?.action, 'unpublish');
+        assert.equal(kept?.reporterId, reader, 'the record survives the takedown');
+        assert.equal(kept?.reason, '这张卡里有别人的真实信息');
+        assert.equal(market.reports('open').length, 1, 'only the one that was resolved left the queue');
+
+        market.resolveReport(market.reports('open')[0]!.id, owner, 'dismiss');
+        assert.deepEqual(market.reports('open'), []);
+        assert.equal(market.reports('all').length, 2, 'resolving empties the queue, not the history');
+    });
+});
+
+test('a report is refused against something that is not published', async () => {
+    await withDb((db) => {
+        const auth = new AuthService(db, { kdf: FAST_KDF });
+        const market = new MarketService(db);
+        const owner = auth.register({ handle: 'owner', password: PASSWORD }).user.id;
+        const reader = auth.register({ handle: 'reader', password: PASSWORD }).user.id;
+
+        assert.throws(() => market.resolveReport(999, owner, 'dismiss'), /no such report/);
+        market.report(owner, 'linzhao', reader, 'never published');
+        assert.equal(market.reports('open').length, 1, 'the report is taken; it is the listing check that the route owns');
+        assert.equal(market.isPublic(owner, 'linzhao'), false);
+    });
+});

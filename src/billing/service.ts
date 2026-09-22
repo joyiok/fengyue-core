@@ -80,6 +80,15 @@ export interface UsageRecord {
 
 const UNLIMITED = 0;
 
+/**
+ * How long a reservation may stand before it is assumed abandoned.
+ *
+ * Generously longer than the gateway's own timeout (120s by default): a turn can
+ * run a summarization pass afterwards, and an expiry that fired mid-turn would
+ * let a second request into the space the first was still holding.
+ */
+const RESERVATION_TTL_MS = 15 * 60 * 1000;
+
 function utcDay(at: Date): string {
     return at.toISOString().slice(0, 10);
 }
@@ -110,8 +119,6 @@ export class BillingService {
     readonly #db: Database;
     readonly #options: BillingServiceOptions;
     readonly #now: () => Date;
-    /** userId -> reservationId -> reservation */
-    readonly #reservations = new Map<string, Map<string, Reservation>>();
 
     constructor(db: Database, options: BillingServiceOptions) {
         this.#db = db;
@@ -188,18 +195,29 @@ export class BillingService {
         return { tokens: Number(row.tokens), requests: Number(row.requests) };
     }
 
-    #inFlight(userId: string): { requests: number; reservedTokens: number } {
-        const map = this.#reservations.get(userId);
-        if (map === undefined) {
-            return { requests: 0, reservedTokens: 0 };
-        }
+    /**
+     * Live reservations, globally or for one account.
+     *
+     * A reservation is the worst case for a request that is still in flight, and
+     * it is the thing that stops ten concurrent requests from each passing a
+     * quota check that had only looked at what was already spent. It is a row
+     * rather than process memory so a restart cannot quietly lower that guard;
+     * `expires_at` is what stops a crashed turn from holding a quota open
+     * forever, and rows past it are ignored here and swept on the next
+     * `authorize`.
+     */
+    #inFlight(userId?: string): { requests: number; reservedTokens: number } {
+        const now = this.#now().toISOString();
 
-        let reservedTokens = 0;
-        for (const reservation of map.values()) {
-            reservedTokens += reservation.reservedTokens;
-        }
+        const row = (userId === undefined
+            ? this.#db.prepare(
+                'SELECT COUNT(*) AS requests, COALESCE(SUM(tokens), 0) AS tokens FROM reservations WHERE expires_at > ?',
+            ).get(now)
+            : this.#db.prepare(
+                'SELECT COUNT(*) AS requests, COALESCE(SUM(tokens), 0) AS tokens FROM reservations WHERE user_id = ? AND expires_at > ?',
+            ).get(userId, now)) as { requests: number | bigint; tokens: number | bigint };
 
-        return { requests: map.size, reservedTokens };
+        return { requests: Number(row.requests), reservedTokens: Number(row.tokens) };
     }
 
     /**
@@ -235,6 +253,10 @@ export class BillingService {
 
         const reservedTokens = Math.max(0, Math.trunc(input.estimatedPromptTokens)) + Math.max(0, Math.trunc(input.requestedMaxTokens));
         const now = this.#now();
+
+        // Sweeping here rather than on a timer: a request is the only thing that
+        // can be blocked by a stale row, so this is the only place it matters.
+        this.#db.prepare('DELETE FROM reservations WHERE expires_at <= ?').run(now.toISOString());
         const usage = this.usageFor(userId, now);
 
         if (policy.dailyTokenLimit > UNLIMITED) {
@@ -279,9 +301,16 @@ export class BillingService {
             requestId: input.requestId ?? null,
         };
 
-        const map = this.#reservations.get(userId) ?? new Map<string, Reservation>();
-        map.set(reservation.id, reservation);
-        this.#reservations.set(userId, map);
+        this.#db.prepare(
+            'INSERT INTO reservations (id, user_id, request_id, tokens, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)',
+        ).run(
+            reservation.id,
+            userId,
+            input.requestId ?? null,
+            reservedTokens,
+            now.toISOString(),
+            new Date(now.getTime() + RESERVATION_TTL_MS).toISOString(),
+        );
 
         return reservation;
     }
@@ -327,15 +356,7 @@ export class BillingService {
 
     /** Give the reservation back without recording anything (failed request). */
     release(reservation: Reservation): void {
-        const map = this.#reservations.get(reservation.userId);
-        if (map === undefined) {
-            return;
-        }
-
-        map.delete(reservation.id);
-        if (map.size === 0) {
-            this.#reservations.delete(reservation.userId);
-        }
+        this.#db.prepare('DELETE FROM reservations WHERE id = ?').run(reservation.id);
     }
 
     /**
@@ -360,14 +381,9 @@ export class BillingService {
             return { tokens: Number(row.tokens), requests: Number(row.requests) };
         };
 
-        let requests = 0;
-        let reservedTokens = 0;
-        for (const live of this.#reservations.values()) {
-            requests += live.size;
-            for (const reservation of live.values()) {
-                reservedTokens += reservation.reservedTokens;
-            }
-        }
+        // Sweep once per overview so a crashed turn's row does not outlive it.
+        this.#db.prepare('DELETE FROM reservations WHERE expires_at <= ?').run(now.toISOString());
+        const live = this.#inFlight();
 
         const recent = (this.#db.prepare(
             `SELECT user_id, chat_id, model, total_tokens, usage_source, created_at
@@ -391,7 +407,7 @@ export class BillingService {
         return {
             day: totals(utcDay(now)),
             month: totals(utcMonth(now)),
-            inFlight: { requests, reservedTokens },
+            inFlight: live,
             recent,
         };
     }
