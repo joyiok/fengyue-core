@@ -21,6 +21,7 @@ const TABS = [
     { href: '/admin', label: '概览' },
     { href: '/admin/settings', label: '设置' },
     { href: '/admin/users', label: '用户' },
+    { href: '/admin/reviews', label: '审核' },
     { href: '/admin/reports', label: '举报' },
 ];
 

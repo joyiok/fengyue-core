@@ -13,11 +13,12 @@ import { useParams, useRouter } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { CardForm, toDraft, type CardDraft } from '@/components/CardForm';
+import { PublishTimeForm, StatusTag, SubmitWork } from '@/components/SubmitWork';
 import { Icon } from '@/components/icons';
 import { Avatar, ConfirmButton, Loading, Notice } from '@/components/ui';
 import { api, avatarUrl, del, get, post, raw } from '@/lib/api';
 import { ago, count } from '@/lib/format';
-import type { CharacterCard, ChatSummary } from '@/lib/types';
+import type { CharacterCard, ChatSummary, MarketEntry, WorkStatus } from '@/lib/types';
 
 export default function CharacterPage(): React.JSX.Element {
     const params = useParams<{ id: string }>();
@@ -26,7 +27,7 @@ export default function CharacterPage(): React.JSX.Element {
 
     const [card, setCard] = useState<CharacterCard | null>(null);
     const [chats, setChats] = useState<ChatSummary[]>([]);
-    const [published, setPublished] = useState<boolean | null>(null);
+    const [submission, setSubmission] = useState<{ status: WorkStatus | null; character: MarketEntry | null } | null>(null);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [note, setNote] = useState<string | null>(null);
@@ -37,12 +38,13 @@ export default function CharacterPage(): React.JSX.Element {
         const [detail, threads, publishState] = await Promise.all([
             get<{ card: CharacterCard }>(`/characters/${encodeURIComponent(id)}`),
             get<{ chats: ChatSummary[] }>(`/chats/${encodeURIComponent(id)}`).catch(() => ({ chats: [] })),
-            get<{ published: boolean }>(`/characters/${encodeURIComponent(id)}/publish`).catch(() => ({ published: false })),
+            get<{ status: WorkStatus | null; character: MarketEntry | null }>(`/characters/${encodeURIComponent(id)}/publish`)
+                .catch(() => ({ status: null, character: null })),
         ]);
 
         setCard(detail.card);
         setChats(threads.chats);
-        setPublished(publishState.published);
+        setSubmission({ status: publishState.status, character: publishState.character });
     }, [id]);
 
     useEffect(() => {
@@ -65,17 +67,16 @@ export default function CharacterPage(): React.JSX.Element {
         }
     };
 
-    const togglePublish = async (): Promise<void> => {
+    /**
+     * Withdrawing is the only reversible half of the flow: it takes the listing
+     * down and the work can be submitted again. Rejecting is not available to
+     * the author — that is a reviewer's decision, and it comes with a reason.
+     */
+    const withdraw = async (): Promise<void> => {
         try {
-            if (published === true) {
-                await del(`/characters/${encodeURIComponent(id)}/publish`);
-                setPublished(false);
-                setNote('已从市场下架。');
-            } else {
-                await post(`/characters/${encodeURIComponent(id)}/publish`);
-                setPublished(true);
-                setNote('已发布到市场。');
-            }
+            await del(`/characters/${encodeURIComponent(id)}/publish`);
+            setNote('已下架。要重新上架就再提交一次。');
+            await load();
         } catch (caught) {
             setError(caught instanceof Error ? caught.message : String(caught));
         }
@@ -147,7 +148,7 @@ export default function CharacterPage(): React.JSX.Element {
                         <h1>{card.data.name}</h1>
                         <div className="sub">
                             <code>{id}.png</code> · {card.spec === 'chara_card_v3' ? 'V3' : card.spec === 'chara_card_v2' ? 'V2' : 'V1'}
-                            {published === true ? ' · 已发布' : ''}
+                            {' · '}<StatusTag status={submission?.status ?? null} />
                         </div>
                     </div>
                 </div>
@@ -165,9 +166,9 @@ export default function CharacterPage(): React.JSX.Element {
                         <Icon name="upload" size={14} />
                         导出卡
                     </a>
-                    <button type="button" className="btn btn-sm" onClick={() => void togglePublish()}>
-                        {published === true ? '下架' : '发布到市场'}
-                    </button>
+                    {submission?.status === 'public' || submission?.status === 'approved' ? (
+                        <button type="button" className="btn btn-sm" onClick={() => void withdraw()}>下架</button>
+                    ) : null}
                 </div>
             </div>
 
@@ -187,6 +188,27 @@ export default function CharacterPage(): React.JSX.Element {
                     small={false}
                 />
             </div>
+
+            {/* Where this work is in its life, and the two things the author
+                controls about going public: submitting it, and its clock. */}
+            {submission?.status === 'rejected' && submission.character?.reviewNote ? (
+                <div style={{ marginBottom: 14 }}>
+                    <Notice kind="error">
+                        被拒：{submission.character.reviewNote}
+                        <span style={{ display: 'block', marginTop: 6, color: 'var(--text-dim)' }}>
+                            改完下面的设定再重新提交。
+                        </span>
+                    </Notice>
+                </div>
+            ) : null}
+
+            {submission?.status === 'public' && submission.character !== null ? (
+                <PublishTimeForm characterId={id} current={submission.character} onDone={load} />
+            ) : (
+                <SubmitWork characterId={id} current={submission?.character ?? null} onDone={load} />
+            )}
+
+            <div style={{ height: 14 }} />
 
             <CardForm initial={toDraft(card.data)} busy={busy} submitLabel="保存" onSave={save} />
 

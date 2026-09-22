@@ -319,15 +319,57 @@ export interface MarketStats {
     score: number;
 }
 
+export type WorkStatus = 'pending' | 'approved' | 'public' | 'rejected' | 'withdrawn';
+
+/**
+ * Age ratings. Deliberately ours and deliberately few: a rating is a gate, not a
+ * taxonomy — the labels that describe *what* is in a work are tags, and those are
+ * the reader's to filter.
+ */
+export const RATINGS = [
+    { value: 'general', label: '全年龄', hint: '不含性与暴力' },
+    { value: 'adult', label: '成人', hint: '含性或强烈暴力' },
+    { value: 'explicit', label: '露骨', hint: '直白的性描写' },
+] as const;
+
+export type Rating = (typeof RATINGS)[number]['value'];
+
+export const RATING_LABELS: Record<string, string> =
+    Object.fromEntries(RATINGS.map((entry) => [entry.value, entry.label]));
+
 export interface MarketEntry {
     ownerId: string;
     characterId: string;
     name: string;
     tags: string[];
     descriptionLength: number;
+    /** First publication. Never changes. */
     publishedAt: string | null;
+    /** The listing's clock: what the rankings read. The operator's lever. */
+    publishTime: string | null;
+    status: WorkStatus;
+    submittedAt: string | null;
+    reviewedAt: string | null;
+    reviewNote: string | null;
+    scheduledAt: string | null;
+    anonymous: boolean;
+    rating: string;
+    primaryVersion: string | null;
     stats: MarketStats;
     favorited: boolean;
+}
+
+export interface SubmitOptions {
+    scheduledAt?: string | null;
+    anonymous?: boolean;
+    rating?: string;
+    primaryVersion?: string | null;
+}
+
+export interface SubmissionState {
+    status: WorkStatus | null;
+    published: boolean;
+    character: MarketEntry | null;
 }
 
 export interface RankingRow {
