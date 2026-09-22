@@ -280,6 +280,26 @@ export function NewChat({
                             )}
 
                             <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void create()}>
+{asked.length === 0 ? null : (
+                                {    <div className="panel">
+                                {        <div className="section-title" style={{ marginTop: 0 }}>开聊之前</div>
+                                {        {panel === '' ? null : (
+                                {            <div className="stack" dangerouslySetInnerHTML={{ __html: panel }} />
+                                {        )}
+                                {        {asked.map((variable) => (
+                                {            <div className="field" key={variable.key}>
+                                {                <label className="label">{variable.label}{variable.required === true ? ' *' : ''}</label>
+                                {                <input
+                                {                    className="input"
+                                {                    data-var={variable.key}
+                                {                    value={values[variable.key] ?? ''}
+                                {                    onChange={(event) => setValues((previous) => ({ ...previous, [variable.key]: event.target.value }))}
+                                {                />
+                                {                {(variable.help ?? '') === '' ? null : <div className="help">{variable.help}</div>}
+                                {            </div>
+                                {        ))}
+                                {    </div>
+                                {)}
                                 {busy ? '创建中…' : '开始对话'}
                             </button>
                         </>

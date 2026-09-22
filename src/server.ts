@@ -1428,6 +1428,7 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                             worldbookIds?: string[];
                             modIds?: string[];
                             version?: string;
+                            variables?: Record<string, string>;
                         };
 
                         if (typeof body.cardId !== 'string' || body.cardId === '') {
@@ -1445,6 +1446,9 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                         const created = await ChatSession.create(library, {
                             cardId: body.cardId,
                             personaName: body.personaName ?? personaName(),
+                            // Fixed when the chat starts and kept with it: the name
+                            // a reader picked has to be the same name on turn 40.
+                            variables: body.variables ?? {},
                             memory: context.config.memory,
                             ...(body.name !== undefined ? { name: body.name } : {}),
                             ...(body.greetingIndex !== undefined ? { greetingIndex: body.greetingIndex } : {}),
