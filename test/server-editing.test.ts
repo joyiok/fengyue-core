@@ -635,3 +635,52 @@ test('a released version survives later edits, and the listing pins the primary'
         })).status, 200);
     });
 });
+
+test('the author tools are dry runs: they answer without calling the model', async () => {
+    await withServer(async ({ base, register }) => {
+        const owner = await register('owner');
+        await importCard(base, owner.token);
+        const before = mockCount();
+
+        // 召回测试 over a book whose keyword the query mentions.
+        await fetch(`${base}/api/v1/worldbooks/Eldoria`, {
+            method: 'PUT',
+            headers: bearer(owner.token),
+            body: JSON.stringify({ entries: { 0: { uid: 0, key: ['森林'], content: '一片古老森林' } } }),
+        });
+
+        const recall = await fetch(`${base}/api/v1/worldbooks/Eldoria/recall`, {
+            method: 'POST',
+            headers: bearer(owner.token),
+            body: JSON.stringify({ query: '我们去那片森林看看' }),
+        });
+        const recalled = await recall.text();
+        assert.equal(recall.status, 200, recalled);
+        const hits = (JSON.parse(recalled) as { worldInfo: { activated: { uid: number }[]; skippedByKeyLogic: number } }).worldInfo;
+        assert.deepEqual(hits.activated.map((entry) => entry.uid), [0], 'the keyword should have fired');
+
+        // And a miss names the rule that stopped it, rather than shrugging.
+        const miss = await (await fetch(`${base}/api/v1/worldbooks/Eldoria/recall`, {
+            method: 'POST',
+            headers: bearer(owner.token),
+            body: JSON.stringify({ query: '今天天气不错' }),
+        })).json() as { worldInfo: { activated: unknown[]; candidates: number } };
+        assert.deepEqual(miss.worldInfo.activated, []);
+        assert.equal(miss.worldInfo.candidates, 1);
+
+        // 提示词预览: what a turn would send. The point is the number below —
+        // an author tool that quietly spent a turn would be a trap.
+        const preview = await fetch(`${base}/api/v1/characters/linzhao/preview`, {
+            method: 'POST',
+            headers: bearer(owner.token),
+            body: JSON.stringify({ message: '在吗' }),
+        });
+        const text = await preview.text();
+        assert.equal(preview.status, 200, text);
+        const shown = JSON.parse(text) as { messages: { role: string }[]; stats: { sections: string[] } };
+        assert.equal(shown.messages[0]?.role, 'system', 'it really is the assembled prompt');
+        assert.ok(shown.stats.sections.includes('description'));
+
+        assert.equal(mockCount(), before, 'nothing was asked of the model');
+    });
+});

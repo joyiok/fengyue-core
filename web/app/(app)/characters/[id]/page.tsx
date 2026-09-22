@@ -12,6 +12,7 @@ import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { PromptPreview } from '@/components/AuthorTools';
 import { CardForm, toDraft, type CardDraft } from '@/components/CardForm';
 import { PublishTimeForm, StatusTag, SubmitWork } from '@/components/SubmitWork';
 import { VersionsPanel } from '@/components/VersionsPanel';
@@ -208,6 +209,10 @@ export default function CharacterPage(): React.JSX.Element {
             ) : (
                 <SubmitWork characterId={id} current={submission?.character ?? null} onDone={load} />
             )}
+
+            <div className="section-title">作者工具</div>
+
+            <PromptPreview characterId={id} />
 
             <div className="section-title">这张卡</div>
 

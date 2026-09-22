@@ -18,11 +18,13 @@ import path from 'node:path';
 import { AuthError, AuthService, type User } from './auth/service.ts';
 import { BillingService, QuotaError, type Reservation } from './billing/service.ts';
 import { ChatSession } from './chat/session.ts';
+import { normalizeCard } from './cards/types.ts';
 import { appConfigToValues, loadAppConfig, toModelConfig, type AppConfig } from './config.ts';
 import { CreditError, CreditService } from './credits/service.ts';
 import { Database } from './db/database.ts';
 import { ModelError, describeModelConfig, type ModelConfig } from './gateway/types.ts';
 import { Library } from './library.ts';
+import { assemblePrompt } from './prompt/assemble.ts';
 import { MarketError, MarketService, type MarketSort, type RankingWindow } from './market/service.ts';
 import { ModsService, ModError } from './mods/service.ts';
 import { SettingsService } from './settings/service.ts';
@@ -121,6 +123,25 @@ function decodeSegment(value: string | undefined): string | undefined {
     } catch {
         return value;
     }
+}
+
+/**
+ * Fold a loaded mod's entries into the same scan as the card's own books.
+ * Duplicated from ChatSession on purpose: a dry run must not go anywhere near a
+ * session, and the two must agree on what "loaded" means.
+ */
+function mergeWorldbooks(
+    worldbook: Awaited<ReturnType<Library['resolveWorldbooks']>>,
+    extra: Record<string, unknown>,
+): Awaited<ReturnType<Library['resolveWorldbooks']>> {
+    if (Object.keys(extra).length === 0) {
+        return worldbook;
+    }
+
+    return {
+        ...(worldbook ?? { entries: {} }),
+        entries: { ...(worldbook?.entries ?? {}), ...(extra as Record<string, never>) },
+    } as Awaited<ReturnType<Library['resolveWorldbooks']>>;
 }
 
 function statusForError(error: unknown): number {
@@ -1140,6 +1161,52 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                         return sendJson(response, 200, await library.getCard(id));
                     }
 
+                    // ------------------------------------------------ author tools
+
+                    // What this turn *would* send. The CLI has had it forever
+                    // (`preview`); the point of putting it behind HTTP is that an
+                    // author should not have to leave the page to know what their
+                    // card actually produces — and the numbers here are the ones
+                    // the chat's debug panel shows after a real turn, so the two
+                    // cannot disagree about what "this round carried" means.
+                    if (id !== undefined && sub === 'preview' && method === 'POST') {
+                        const body = JSON.parse((await readBody(request)).toString('utf8') || '{}') as {
+                            message?: unknown;
+                            modIds?: unknown;
+                            worldbookIds?: unknown;
+                            version?: unknown;
+                        };
+
+                        const message = typeof body.message === 'string' ? body.message : '';
+                        const card = typeof body.version === 'string' && body.version !== ''
+                            ? await library.getVersionCard(id, body.version)
+                            : await library.getCard(id);
+                        const modIds = Array.isArray(body.modIds) ? body.modIds.map(String) : [];
+                        const worldbookIds = Array.isArray(body.worldbookIds) ? body.worldbookIds.map(String) : undefined;
+
+                        const modState = modIds.length === 0 || context.mods === null || context.mods === undefined
+                            ? null
+                            : context.mods.sessionState(card, id, modIds, user?.id ?? context.config.localUserId);
+
+                        // `preview` is a dry run: nothing is called, nothing is
+                        // charged, and `resolve` still runs so an author sees the
+                        // card's own policy applied to their own test.
+                        const result = assemblePrompt({
+                            card,
+                            history: [],
+                            userMessage: message,
+                            options: {
+                                personaName: personaName(),
+                                ...(modState === null ? {} : { mods: modState.payloads }),
+                            },
+                            ...(modState === null
+                                ? (worldbookIds === undefined ? {} : { worldbook: await library.resolveWorldbooks(card, worldbookIds) })
+                                : { worldbook: mergeWorldbooks(await library.resolveWorldbooks(card, worldbookIds), modState.entries) }),
+                        });
+
+                        return sendJson(response, 200, { messages: result.messages, stats: result.stats });
+                    }
+
                     // Released versions of one work. The bytes are PNGs like the
                     // working copy (a version has to be exportable); the metadata
                     // is what the author wrote about them.
@@ -1291,6 +1358,32 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                 }
 
                 if (resource === 'worldbooks') {
+                    // 召回测试: given a line of text, which entries fire and why.
+                    // Runs the real scanner over the real book against an empty
+                    // card, so "would this keyword hit?" is answered by the same
+                    // code that decides it in a conversation.
+                    if (id !== undefined && parts[4] === 'recall' && method === 'POST') {
+                        const body = JSON.parse((await readBody(request)).toString('utf8') || '{}') as { query?: unknown };
+                        const query = typeof body.query === 'string' ? body.query : '';
+                        const book = await library.getWorldbook(id);
+
+                        const probe = normalizeCard({
+                            spec: 'chara_card_v2',
+                            data: { name: 'probe', description: '' },
+                        });
+
+                        const result = assemblePrompt({
+                            card: probe,
+                            history: [{ name: 'user', is_user: true, send_date: 0, mes: query }],
+                            userMessage: '',
+                            options: { personaName: personaName() },
+                            worldbook: { id, entries: book.entries },
+                        });
+
+                        return sendJson(response, 200, { query, worldInfo: result.stats.worldInfo });
+                    }
+
+
                     if (method === 'GET' && id === undefined) {
                         return sendJson(response, 200, { worldbooks: await library.listWorldbooks() });
                     }

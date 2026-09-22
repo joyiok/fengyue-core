@@ -12,6 +12,7 @@ import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 
+import { RecallTest } from '@/components/AuthorTools';
 import { Icon } from '@/components/icons';
 import { ConfirmButton, Loading, Notice } from '@/components/ui';
 import { del, get, put } from '@/lib/api';
@@ -166,7 +167,11 @@ export default function WorldbookPage(): React.JSX.Element {
 
             {book === null ? <Loading /> : (
                 <>
-                    <div className="row" style={{ margin: '16px 0' }}>
+                    <div style={{ margin: '16px 0' }}>
+                <RecallTest worldbookId={id} />
+            </div>
+
+            <div className="row" style={{ margin: '16px 0' }}>
                         <button type="button" className="btn btn-sm" onClick={addEntry}>
                             <Icon name="plus" size={14} />
                             加词条
