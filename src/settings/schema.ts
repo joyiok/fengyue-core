@@ -95,7 +95,7 @@ export const SETTINGS: SettingSpec[] = [
         default: '',
         env: 'STORY_MODEL_ENDPOINT',
         group: 'model',
-        description: 'OpenAI-compatible /chat/completions endpoint. Empty = turns are refused with 503.',
+        description: 'OpenAI-compatible 接口地址。写 https://host/v1 或完整的 https://host/v1/chat/completions 都可以。留空 = 发消息被拒（503）。',
     },
     {
         key: 'model.name',

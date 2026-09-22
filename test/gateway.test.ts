@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createChatCompletion } from '../src/gateway/openai.ts';
+import { completionsUrl, createChatCompletion } from '../src/gateway/openai.ts';
 import { ModelError, describeModelConfig, type ModelConfig } from '../src/gateway/types.ts';
 import { startMockModel, respondWith } from './helpers/mock-model.ts';
 
@@ -183,4 +183,15 @@ test('a mock that echoes lets a caller inspect the assembled prompt', async () =
     } finally {
         await mock.close();
     }
+});
+
+test('the endpoint is typed by hand, so either spelling works', () => {
+    assert.equal(completionsUrl('https://host/v1'), 'https://host/v1/chat/completions');
+    assert.equal(completionsUrl('https://host/v1/'), 'https://host/v1/chat/completions');
+    assert.equal(completionsUrl('https://host/v1//'), 'https://host/v1/chat/completions');
+    assert.equal(
+        completionsUrl('https://host/v1/chat/completions'),
+        'https://host/v1/chat/completions',
+        'already the full path: unchanged, not doubled',
+    );
 });

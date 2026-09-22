@@ -158,7 +158,7 @@ async function postRequest(
     let response: Response;
 
     try {
-        response = await fetch(config.endpoint, {
+        response = await fetch(completionsUrl(config.endpoint), {
             method: 'POST',
             headers,
             body: JSON.stringify(buildBody(config, request, stream)),
@@ -176,13 +176,36 @@ async function postRequest(
     if (!response.ok) {
         const body = (await response.text().catch(() => '')).slice(0, MAX_ERROR_BODY);
         // Note: the API key is never included here, only what the upstream said.
-        throw new ModelError(`model endpoint returned HTTP ${response.status}`, {
+        // A 404 here is almost always the tail of the URL, and saying so is
+        // the difference between a two-second fix and an hour of guessing.
+        const hint = response.status === 404
+            ? '（404 几乎总是地址末尾不对：写 `https://host/v1` 或完整的 '
+              + '`https://host/v1/chat/completions` 都可以，两种都收）'
+            : '';
+        throw new ModelError(`model endpoint returned HTTP ${response.status}${hint}`, {
             status: response.status,
             body,
         });
     }
 
     return response;
+}
+
+/**
+ * The chat-completions URL, from whatever the operator typed.
+ *
+ * Both spellings exist in the wild — `https://host/v1` and the full
+ * `https://host/v1/chat/completions` — and until this function only the second
+ * worked. Filling in the first produced `HTTP 404`, which reads as "the model
+ * is unreachable" and says nothing about the URL.
+ *
+ * Accepting both is not laziness. This is a string typed by hand out of a
+ * provider's docs, and a failure that looks like their model is down when it is
+ * only our path is our bug and not theirs.
+ */
+export function completionsUrl(endpoint: string): string {
+    const base = endpoint.replace(/\/+$/, '');
+    return base.endsWith('/chat/completions') ? base : `${base}/chat/completions`;
 }
 
 export async function createChatCompletion(config: ModelConfig, request: CompletionRequest): Promise<CompletionResult> {
