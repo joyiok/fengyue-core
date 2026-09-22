@@ -16,6 +16,7 @@
  *      rows. A private character is invisible to everyone but its owner, no matter
  *      how the id is guessed.
  */
+import { BlocksService } from '../blocks/service.ts';
 import type { Database } from '../db/database.ts';
 
 export type RankingWindow = 'day' | 'week' | 'month' | 'all';
@@ -528,6 +529,8 @@ export class MarketService {
         limit?: number;
         offset?: number;
         requesterId?: string;
+        /** Tags this reader never wants to see. */
+        blockedTags?: string[];
     } = {}): MarketEntry[] {
         const limit = Math.max(1, Math.min(100, Math.trunc(options.limit ?? 20)));
         const offset = Math.max(0, Math.trunc(options.offset ?? 0));
@@ -567,6 +570,11 @@ export class MarketService {
         const favorites = options.requesterId === undefined ? new Set<string>() : this.#favoriteKeys(options.requesterId);
 
         const entries = rows.map((row) => this.#toEntry(row.user_id, row, stats, favorites));
+
+        // Taste is not policy: what one person must see is another's
+        // never-show-me, so this is the reader's filter and not a takedown.
+        const blocked = options.blockedTags ?? [];
+        return entries.filter((entry) => !BlocksService.isBlocked(entry.tags, blocked));
 
         if (sort === 'hot') {
             entries.sort((a, b) => b.stats.score - a.stats.score || a.name.localeCompare(b.name));

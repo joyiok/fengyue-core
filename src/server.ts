@@ -26,6 +26,7 @@ import { Library } from './library.ts';
 import { MarketError, MarketService, type MarketSort, type RankingWindow } from './market/service.ts';
 import { ModsService, ModError } from './mods/service.ts';
 import { SettingsService } from './settings/service.ts';
+import { BlockError, BlocksService } from './blocks/service.ts';
 import { VersionError, VersionsService } from './versions/service.ts';
 
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
@@ -214,6 +215,7 @@ export interface ServerContext {
     /** Mods are content a player loads onto a work. Null in single-user mode. */
     mods?: ModsService | null;
     versions?: VersionsService | null;
+    blocks?: BlocksService | null;
     libraryFor: (userId: string) => Library | Promise<Library>;
 }
 
@@ -230,6 +232,7 @@ export function singleUserContext(library: Library, config: AppConfig = loadAppC
         settings: null,
         mods: null,
         versions: null,
+        blocks: null,
         config,
         auth: null,
         billing: null,
@@ -299,7 +302,8 @@ export function createAppContext(seed: AppConfig = loadAppConfig()): AppContext 
     // routes, so switching the market off does not need a restart.
     const market = withAccounts ? new MarketService(db) : null;
     const mods = withAccounts ? new ModsService(db) : null;
-    const versions = withAccounts ? new VersionsService(db) : new VersionsService(db);
+    const versions = new VersionsService(db);
+    const blocks = withAccounts ? new BlocksService(db) : null;
 
     const libraryFor = (userId: string): Library => {
         // Single-user mode points straight at a SillyTavern data directory; with
@@ -330,6 +334,7 @@ export function createAppContext(seed: AppConfig = loadAppConfig()): AppContext 
         market,
         mods,
         versions,
+        blocks,
         libraryFor,
         db,
         close: () => db.close(),
@@ -568,6 +573,39 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
 
                         setSessionCookie(response, issued.token, issued.expiresAt, request);
                         return sendJson(response, 200, issued);
+                    }
+
+                    // What this reader never wants to see. Taste, not policy —
+                    // so it is per user and lives under /me, not in review.
+                    if (action === 'blocks') {
+                        const blocks = context.blocks;
+                        if (blocks === null || blocks === undefined) {
+                            return sendJson(response, 400, { error: 'blocks_disabled' });
+                        }
+
+                        const kind = decodeSegment(parts[4]);
+                        const value = decodeSegment(parts[5]);
+
+                        if (method === 'GET') {
+                            return sendJson(response, 200, blocks.list(user.id));
+                        }
+
+                        if (method === 'POST' && kind === undefined) {
+                            const body = JSON.parse((await readBody(request)).toString('utf8') || '{}') as { kind?: unknown; value?: unknown };
+                            return sendJson(response, 200, blocks.add(
+                                user.id,
+                                body.kind === 'word' ? 'word' : 'tag',
+                                String(body.value ?? ''),
+                            ));
+                        }
+
+                        if (method === 'DELETE' && kind !== undefined) {
+                            return sendJson(response, 200, blocks.remove(
+                                user.id,
+                                kind === 'word' ? 'word' : 'tag',
+                                value ?? '',
+                            ));
+                        }
                     }
 
                     if (method === 'GET' && action === 'favorites') {
@@ -1484,6 +1522,9 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                         const session = await ChatSession.load(library, id, sub, {
                             personaName: body.personaName ?? personaName(),
                             memory: context.config.memory,
+                            ...(context.blocks === null || context.blocks === undefined || user === null
+                                ? {}
+                                : { blockedWords: context.blocks.blockedWords(user.id) }),
                         });
 
                         // Credits are the user-facing balance; the token quota below is
@@ -1750,6 +1791,10 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                         message: error.message,
                         ...error.details,
                     });
+                }
+
+                if (error instanceof BlockError) {
+                    return sendJson(response, error.status, { error: error.code, message: error.message });
                 }
 
                 if (error instanceof VersionError) {

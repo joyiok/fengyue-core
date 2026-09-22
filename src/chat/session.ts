@@ -21,6 +21,7 @@ import { createChatCompletion, streamChatCompletion } from '../gateway/openai.ts
 import { estimateMessagesTokens } from '../prompt/estimate.ts';
 import type { CompletionUsage, ModelConfig, SamplingOverrides, UsageSource } from '../gateway/types.ts';
 import { ModelError } from '../gateway/types.ts';
+import { BlocksService } from '../blocks/service.ts';
 import type { Library } from '../library.ts';
 import type { Worldbook, WorldbookEntry } from '../worldbooks/types.ts';
 import { assemblePrompt } from '../prompt/assemble.ts';
@@ -47,6 +48,8 @@ export interface SessionOptions {
     worldbookIds?: string[];
     /** Start on a released version rather than the working copy. */
     version?: string;
+    /** Words this reader never wants to see. Masked in the reply *and* the log. */
+    blockedWords?: string[];
     /** Rolling summary memory. */
     memory?: MemoryConfig;
     /**
@@ -145,6 +148,7 @@ export class ChatSession {
     readonly personaName: string;
     readonly promptOptions: Omit<PromptOptions, 'personaName'>;
     private readonly memoryOptions: MemoryConfig;
+    private readonly blockedWords: string[];
 
     private readonly library: Library;
     private readonly log: ChatMessage[];
@@ -172,6 +176,7 @@ export class ChatSession {
         this.personaName = options.personaName;
         this.promptOptions = { ...defaultPromptOptions(), ...options.prompt };
         this.memoryOptions = { ...options.memory };
+        this.blockedWords = options.blockedWords ?? [];
         this.log = log;
         this.metadata = metadata;
         this.worldbook = worldbook;
@@ -346,19 +351,23 @@ export class ChatSession {
         this.worldInfoState = assembled.nextWorldInfoState;
         this.persistMetadata();
 
+        // Mask before anything is shown *or* saved, so the screen and the log
+        // cannot disagree about what was said.
+        const shown = BlocksService.mask(completion.content, this.blockedWords ?? []);
+
         this.log.push({ name: this.personaName, is_user: true, send_date: now, mes: userMessage });
         this.log.push({
             name: this.card.data.name,
             is_user: false,
             send_date: now,
-            mes: completion.content,
+            mes: shown.text,
             extra: { model: completion.model, story: extra },
         });
 
         await this.save();
 
         return {
-            reply: completion.content,
+            reply: shown.text,
             stats: assembled.stats,
             usage: completion.usage,
             usageSource: completion.usageSource,
