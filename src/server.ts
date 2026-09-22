@@ -826,6 +826,66 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                     }
                 }
 
+                // ---------------------------------------------------------- mods
+
+                // Reusable pieces a player loads onto a work. A mod is content,
+                // not a plugin (docs/mods.md): it may carry policy but never
+                // behaviour, or the prompt layer stops being a pure function.
+                if (parts[2] === 'mods') {
+                    const store = context.mods;
+                    if (store === null || store === undefined) {
+                        return sendJson(response, 400, { error: 'mods_disabled', message: 'this server runs without accounts' });
+                    }
+
+                    const id = decodeSegment(parts[3]);
+                    const action = decodeSegment(parts[4]);
+
+                    if (method === 'GET' && id === undefined) {
+                        const mine = url.searchParams.get('mine') !== null;
+                        const characterId = url.searchParams.get('characterId') ?? undefined;
+                        const query = url.searchParams.get('q') ?? undefined;
+                        const ownerId = user?.id ?? context.config.localUserId;
+
+                        return sendJson(response, 200, {
+                            mods: mine ? store.listFor(ownerId) : store.gallery({ ownerId, ...(characterId === undefined ? {} : { characterId }), ...(query === undefined ? {} : { query }) }),
+                        });
+                    }
+
+                    if (method === 'POST' && id === undefined) {
+                        const body = JSON.parse((await readBody(request)).toString('utf8') || '{}') as Record<string, unknown>;
+                        return sendJson(response, 201, {
+                            mod: store.create(user?.id ?? context.config.localUserId, body as never),
+                        });
+                    }
+
+                    if (id === undefined) {
+                        return sendJson(response, 404, { error: 'not found', path: url.pathname });
+                    }
+
+                    const ownerId = user?.id ?? context.config.localUserId;
+
+                    if (method === 'GET') {
+                        return sendJson(response, 200, { mod: store.require(id) });
+                    }
+
+                    if (method === 'DELETE') {
+                        return sendJson(response, 200, { removed: store.remove(id, ownerId) });
+                    }
+
+                    if (method === 'PUT' && action === undefined) {
+                        const body = JSON.parse((await readBody(request)).toString('utf8') || '{}') as Record<string, unknown>;
+                        return sendJson(response, 200, { mod: store.update(id, ownerId, body as never) });
+                    }
+
+                    // Uploading to the gallery is explicit. Nothing is shared as
+                    // a side effect of anything else.
+                    if (method === 'POST' && action === 'visibility') {
+                        const body = JSON.parse((await readBody(request)).toString('utf8') || '{}') as { visibility?: unknown };
+                        const visibility = body.visibility === 'public' ? 'public' as const : 'private' as const;
+                        return sendJson(response, 200, { mod: store.setVisibility(id, ownerId, visibility) });
+                    }
+                }
+
                 const resource = parts[2];
                 const id = decodeSegment(parts[3]);
                 // Chat and character ids are URL-encoded on the way in (names contain

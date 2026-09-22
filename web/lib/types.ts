@@ -310,6 +310,45 @@ export interface LoginResult {
     credits?: { balance: number } | null;
 }
 
+// -------------------------------------------------------------------- mods
+
+/**
+ * A reusable piece a player loads onto a work. Content, not a plugin: it may
+ * carry policy (a memory preset) but never behaviour.
+ */
+export interface Mod {
+    id: string;
+    ownerId: string;
+    name: string;
+    description: string;
+    visibility: 'private' | 'public';
+    /** `dedicated` mods are only selectable inside their one work. */
+    scope: 'shared' | 'dedicated';
+    boundCharacterId: string | null;
+    systemPrompt: string;
+    postHistory: string;
+    worldbook: Record<string, unknown>;
+    style: string;
+    /**
+     * A memory preset. The only mod payload that costs money: it turns on
+     * summarization, and each pass is a real, billed model call.
+     */
+    memory: { enabled?: boolean; messageThreshold?: number; keepRecent?: number; maxSummaryTokens?: number; instruction?: string } | null;
+    tags: string[];
+    uses: number;
+    createdAt: string;
+    updatedAt: string;
+}
+
+export type ModPolicy = 'none' | 'own' | 'own-dedicated' | 'all';
+
+export const MOD_POLICIES: [ModPolicy, string, string][] = [
+    ['all', '全开', '任何人都能给这张卡加载 Mod'],
+    ['own-dedicated', '公用 Mod 不限', '但专用 Mod 只能是自己写的（默认）'],
+    ['own', '只用自己的', '别人写的 Mod 一律不许'],
+    ['none', '不许加载', '这张卡就是它自己'],
+];
+
 // ------------------------------------------------------------------ market
 
 export interface MarketStats {

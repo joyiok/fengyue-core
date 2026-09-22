@@ -12,7 +12,7 @@ import { useEffect, useState } from 'react';
 
 import { avatarUrl, get, post } from '@/lib/api';
 import { head } from '@/lib/format';
-import type { CharacterCard, CharacterListEntry, WorldbookSummary } from '@/lib/types';
+import type { CharacterCard, CharacterListEntry, Mod, WorldbookSummary } from '@/lib/types';
 import { Avatar, Loading, Notice } from './ui';
 import { Icon } from './icons';
 
@@ -36,6 +36,8 @@ export function NewChat({
      *  own link rather than silently dropping it. */
     const [attached, setAttached] = useState<string[] | null>(null);
     const [greeting, setGreeting] = useState(0);
+    const [mods, setMods] = useState<Mod[]>([]);
+    const [attachedMods, setAttachedMods] = useState<string[]>([]);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
@@ -70,6 +72,22 @@ export function NewChat({
             : current.includes(id) ? current.filter((entry) => entry !== id) : [...current, id]);
     };
 
+    // Only what this work may carry: shared mods from everyone, plus dedicated
+    // mods written for this one. The server enforces the card's policy again at
+    // `POST /chats` — this is about showing an honest list, not about security.
+    useEffect(() => {
+        if (picked === null || card === null) {
+            return;
+        }
+
+        void get<{ mods: Mod[] }>(`/mods?characterId=${encodeURIComponent(picked)}`)
+            .then((available) => {
+                setMods(available.mods.filter((mod) => mayLoad(card, mod)));
+                setAttachedMods([]);
+            })
+            .catch(() => setMods([]));
+    }, [picked, card]);
+
     const create = async (): Promise<void> => {
         if (picked === null) {
             return;
@@ -85,6 +103,7 @@ export function NewChat({
                 cardId: picked,
                 greetingIndex: greeting,
                 ...(attached === null ? {} : { worldbookIds: attached }),
+                ...(attachedMods.length === 0 ? {} : { modIds: attachedMods }),
             });
             onCreated(created);
         } catch (caught) {
@@ -226,6 +245,40 @@ export function NewChat({
                                 )}
                             </div>
 
+                            {mods.length === 0 ? null : (
+                                <div className="field">
+                                    <label>Mod</label>
+                                    {mods.map((mod) => {
+                                        const on = attachedMods.includes(mod.id);
+                                        return (
+                                            <label
+                                                key={mod.id}
+                                                className="row"
+                                                style={{ gap: 10, padding: '6px 10px', borderRadius: 'var(--radius-sm)', background: 'var(--ink-1)', cursor: 'pointer', fontSize: 13.5 }}
+                                            >
+                                                <input
+                                                    type="checkbox"
+                                                    checked={on}
+                                                    onChange={() => setAttachedMods((current) => on ? current.filter((entry) => entry !== mod.id) : [...current, mod.id])}
+                                                />
+                                                <span className="grow">{mod.name}</span>
+                                                {mod.memory === null ? null : <span className="tag lamp">会花钱</span>}
+                                                <span style={{ color: 'var(--text-faint)', fontSize: 12 }}>{mod.scope === 'dedicated' ? '专用' : '公用'}</span>
+                                            </label>
+                                        );
+                                    })}
+
+                                    {attachedMods.some((id) => mods.find((mod) => mod.id === id)?.memory != null) ? (
+                                        <div className="notice" style={{ marginTop: 8 }}>
+                                            选中的 Mod 会开启<b>滚动摘要</b>：每次合并是一次真实且计费的模型调用。
+                                            不带记忆预设的 Mod 不产生这笔费用。
+                                        </div>
+                                    ) : null}
+
+                                    <span className="hint">这张卡允许的才列在这里——每张卡有自己的来源策略，写在卡里、跟着卡走。</span>
+                                </div>
+                            )}
+
                             <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void create()}>
                                 {busy ? '创建中…' : '开始对话'}
                             </button>
@@ -235,4 +288,23 @@ export function NewChat({
             ) : null}
         </div>
     );
+}
+
+/**
+ * Mirror of the server's four policy tiers, for the list only.
+ *
+ * `extensions.story.mods.policy` lives on the card so it travels with the PNG;
+ * the server enforces it again at `POST /chats`. Hiding a button is not a
+ * boundary — this is about showing an honest list, not about security.
+ */
+function mayLoad(card: CharacterCard, mod: Mod): boolean {
+    const story = (card.data.extensions?.story ?? {}) as { mods?: { policy?: unknown }; authorId?: unknown };
+    const policy = story.mods?.policy;
+    const authorId = typeof story.authorId === 'string' ? story.authorId : null;
+    const mine = mod.ownerId === authorId;
+
+    if (policy === 'none') return false;
+    if (policy === 'own') return mine;
+    if (policy === 'own-dedicated') return mod.scope === 'shared' || mine;
+    return true;
 }
