@@ -77,7 +77,7 @@ export default function AccountPage(): React.JSX.Element {
                     <h1>账户</h1>
                     <div className="sub">
                         @{handle}{role === 'admin' ? ' · 管理员' : ''}
-                        {role === 'admin' ? <Link href="/admin/settings" style={{ color: 'var(--lamp)', marginLeft: 10 }}>管理入口 →</Link> : null}
+                        {role === 'admin' ? <Link href="/admin" style={{ color: 'var(--lamp)', marginLeft: 10 }}>管理入口 →</Link> : null}
                     </div>
                 </div>
             </div>

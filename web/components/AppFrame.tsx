@@ -24,8 +24,10 @@ function Rail(): React.JSX.Element {
     const { me, logout } = useSession();
     const pathname = usePathname();
 
-    const current = (href: string): boolean =>
-        pathname === href || (href !== '/chats' && pathname.startsWith(`${href}/`)) || (href === '/chats' && pathname.startsWith('/chats/'));
+    // Prefix matching, so /characters/林昭 still highlights 角色. The two admin
+    // entries are exact: /admin/users must not light up under /admin.
+    const current = (href: string, exact = false): boolean =>
+        exact ? pathname === href : pathname === href || pathname.startsWith(`${href}/`);
 
     return (
         <nav className="rail">
@@ -55,9 +57,9 @@ function Rail(): React.JSX.Element {
                     <div className="rail-divider" />
                     <div className="rail-label">管理</div>
                     <Link
-                        href="/admin/settings"
+                        href="/admin"
                         className="nav-link"
-                        aria-current={current('/admin/settings') ? 'page' : undefined}
+                        aria-current={current('/admin', true) ? 'page' : undefined}
                     >
                         <Icon name="account" />
                         <span>设置</span>
@@ -65,7 +67,7 @@ function Rail(): React.JSX.Element {
                     <Link
                         href="/admin/users"
                         className="nav-link"
-                        aria-current={current('/admin/users') ? 'page' : undefined}
+                        aria-current={current('/admin/users', true) ? 'page' : undefined}
                     >
                         <Icon name="characters" />
                         <span>用户</span>
