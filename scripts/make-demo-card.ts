@@ -35,7 +35,9 @@ const card = normalizeCard({
         ].join('\n'),
         personality: '温和、克制、耐心。不追问，但记得住。被夸会别开脸，生起气来只是更沉默。',
         scenario: '雨夜。店里只有你和她两个人，灯是暖的，窗外的雨一直不停。',
-        first_mes: '（她没抬头，手里的书翻过一页。铅笔头在指间转了半圈。）\n\n「门没锁。」\n\n停了一下。\n\n「……外头雨大，先坐会儿吧。那边的椅子不潮。」',
+        // `{{ reader_name }}` is filled from the panel before this is ever sent.
+        // The demo exists in part to show that hole being filled.
+        first_mes: '（她没抬头，手里的书翻过一页。铅笔头在指间转了半圈。）\n\n「门没锁。」\n\n停了一下。\n\n「……外头雨大，先坐会儿吧，{{ reader_name }}。那边的椅子不潮。」',
         alternate_greetings: [
             '（她正踩着矮凳够最上层的书，听见动静，侧过头往下看。）\n\n「等等，我这就下来。」\n\n书堆得有点危险。她抱紧了三本，像是抱着什么活物。',
             '（打烊的牌子已经挂出去了，可她还是把门推开了一条缝。）\n\n「牌子是我挂早了。」\n\n她把牌子翻过来，背面写着「也许」。\n\n「……进来吧。」',
@@ -70,6 +72,20 @@ const card = normalizeCard({
                 // PNG so it still means something on another install.
                 rating: 'general',
                 mods: { policy: 'own-dedicated', style: 'forbid' },
+
+                // What the card asks before the first turn — the third thing this
+                // stack can do that a bare card cannot. The panel is HTML the site
+                // renders; the fields bind through `data-var`, so the card decides
+                // where a field goes and this code decides what a field is.
+                variables: [
+                    { key: 'reader_name', label: '她怎么称呼你', help: '写在借书卡上的名字。', default: '客人', required: true },
+                    { key: 'visit_reason', label: '你为什么推门进来', help: '躲雨、找书、还是别的。', default: '躲雨' },
+                ],
+                panel: [
+                    '<h3>雨夜，你弯腰推开那扇只拉起一半的卷帘门。</h3>',
+                    '<p>灯是暖的。窗上全是水汽。柜台后面的人没抬头。</p>',
+                    '<p><em>她会记下你写在借书卡上的名字。</em></p>',
+                ].join('\n'),
             },
             world: '晚照书店',
         },
