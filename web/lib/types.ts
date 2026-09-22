@@ -209,6 +209,28 @@ export interface SettingEntry {
     env?: string;
 }
 
+// ------------------------------------------------------------------- admin
+
+export interface AdminOverview {
+    accounts: { total: number; active: number; disabled: number };
+    usage: {
+        day: { tokens: number; requests: number };
+        month: { tokens: number; requests: number };
+        inFlight: { requests: number; reservedTokens: number };
+        recent: {
+            userId: string;
+            chatId: string | null;
+            model: string;
+            totalTokens: number;
+            usageSource: string;
+            createdAt: string;
+        }[];
+    } | null;
+    credits: { granted: number; spent: number; balance: number } | null;
+    market: { published: number; favorites: number } | null;
+    model: { configured: boolean; name?: string; endpoint?: string };
+}
+
 // ------------------------------------------------------------------ account
 
 export interface QuotaPolicy {

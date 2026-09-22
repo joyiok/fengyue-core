@@ -53,6 +53,9 @@ interface Harness {
     register: (handle: string) => Promise<{ token: string; user: { id: string; role: string } }>;
 }
 
+let MOCK_CALLS = 0;
+const mockCount = (): number => MOCK_CALLS;
+
 async function withServer(run: (harness: Harness) => Promise<void>): Promise<void> {
     const dir = await mkdtemp(path.join(tmpdir(), 'story-editing-'));
     const db = new Database(path.join(dir, 'test.sqlite'));
@@ -75,7 +78,11 @@ async function withServer(run: (harness: Harness) => Promise<void>): Promise<voi
 
     // Every test has a working model behind it, so a route that happens to reach
     // the gateway gets a reply instead of a connection error.
-    const mock = await startMockModel(respondWith('嗯。'));
+    MOCK_CALLS = 0;
+    const mock = await startMockModel((request, response) => {
+        MOCK_CALLS += 1;
+        respondWith('嗯。')(request, response);
+    });
 
     const libraries = new Map<string, Library>();
     const context: ServerContext = {
@@ -432,5 +439,57 @@ test('a published card can be read before it is imported', async () => {
         const card = JSON.parse(detailText) as { data: { name: string; first_mes: string } };
         assert.equal(card.data.name, '林昭');
         assert.equal(card.data.first_mes, '来了。');
+    });
+});
+
+test('a message can be rewritten in place without asking the model anything', async () => {
+    await withServer(async ({ base, register }) => {
+        const owner = await register('owner');
+        await importCard(base, owner.token);
+        await newChat(base, owner.token);
+
+        // One real turn, so there is an assistant reply to edit.
+        const before = mockCount();
+        const turn = await fetch(`${base}/api/v1/chats/linzhao/session/messages`, {
+            method: 'POST',
+            headers: bearer(owner.token),
+            body: JSON.stringify({ message: '在吗' }),
+        });
+        assert.equal(turn.status, 200, await turn.text());
+
+        const patch = await fetch(`${base}/api/v1/chats/linzhao/session/messages/2`, {
+            method: 'PATCH',
+            headers: bearer(owner.token),
+            body: JSON.stringify({ message: '（她把书合上了）' }),
+        });
+        const text = await patch.text();
+        assert.equal(patch.status, 200, text);
+        assert.deepEqual(JSON.parse(text), {
+            character: 'linzhao',
+            name: 'session',
+            index: 2,
+            message: { name: '林昭', isUser: false, mes: '（她把书合上了）' },
+        });
+
+        // A log edit is not a turn: nothing new appeared and the model was not
+        // asked for anything.
+        const chat = await (await fetch(`${base}/api/v1/chats/linzhao/session`, { headers: bearer(owner.token) })).json() as {
+            chat: { messages: { mes: string }[] };
+        };
+        assert.equal(chat.chat.messages.length, 3);
+        assert.equal(chat.chat.messages[2]?.mes, '（她把书合上了）');
+        assert.equal(mockCount(), before + 1, 'exactly the one turn called the model');
+
+        // Bad indices and empty text are refused without touching the log.
+        assert.equal((await fetch(`${base}/api/v1/chats/linzhao/session/messages/9`, {
+            method: 'PATCH',
+            headers: bearer(owner.token),
+            body: JSON.stringify({ message: 'x' }),
+        })).status, 404);
+        assert.equal((await fetch(`${base}/api/v1/chats/linzhao/session/messages/0`, {
+            method: 'PATCH',
+            headers: bearer(owner.token),
+            body: JSON.stringify({ message: '' }),
+        })).status, 400);
     });
 });

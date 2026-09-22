@@ -199,3 +199,66 @@ test('users can be listed and looked up', async () => {
         assert.equal(throwsCode(() => auth.setStatus('nope', 'active')), 'user_not_found');
     });
 });
+
+// ------------------------------------------------------- changing a password
+
+test('changing a password needs the old one and logs every other session out', async () => {
+    await withAuth((auth) => {
+        const owner = auth.register({ handle: 'owner', password: 'first-long-password' });
+        const kept = auth.register({ handle: 'nobody', password: 'other-long-password' });
+
+        // A second session for the same account, as if from another browser.
+        const thief = auth.login('owner', 'first-long-password');
+        assert.ok(auth.authenticate(thief.token) !== null);
+
+        // A live session is not enough to re-key the account: a stolen cookie must
+        // not be able to lock the real owner out.
+        assert.equal(throwsCode(() => auth.changePassword(owner.user.id, 'guess', 'brand-new-password')), 'invalid_credentials');
+
+        const issued = auth.changePassword(owner.user.id, 'first-long-password', 'brand-new-password');
+        assert.equal(issued.token !== owner.token, true, 'a fresh token comes back');
+
+        // Everyone else is out — including the session that was stolen.
+        assert.equal(auth.authenticate(thief.token), null);
+        assert.equal(auth.authenticate(owner.token), null);
+        assert.ok(auth.authenticate(issued.token) !== null, 'the caller stays signed in');
+
+        // And the old password no longer opens the door.
+        assert.equal(throwsCode(() => auth.login('owner', 'first-long-password')), 'invalid_credentials');
+        assert.ok(auth.login('owner', 'brand-new-password').token.length > 0);
+
+        // A password change is not an excuse to skip the rules.
+        assert.equal(throwsCode(() => auth.changePassword(owner.user.id, 'brand-new-password', 'short')), 'invalid_password');
+
+        // Other accounts are untouched.
+        assert.ok(auth.authenticate(kept.token) !== null);
+    });
+});
+
+test('an operator can reset a password, and that also clears the sessions', async () => {
+    await withAuth((auth) => {
+        const owner = auth.register({ handle: 'owner', password: 'first-long-password' });
+        const inside = auth.login('owner', 'first-long-password');
+
+        auth.resetPassword(owner.user.id, 'recovered-long-password');
+
+        assert.equal(auth.authenticate(inside.token), null);
+        assert.equal(throwsCode(() => auth.login('owner', 'first-long-password')), 'invalid_credentials');
+        assert.ok(auth.login('owner', 'recovered-long-password').token.length > 0);
+        assert.equal(throwsCode(() => auth.resetPassword('missing', 'whatever-long')), 'not_found');
+    });
+});
+
+test('account counts add up to the listing', async () => {
+    await withAuth((auth) => {
+        assert.deepEqual(auth.counts(), { total: 0, active: 0, disabled: 0 });
+
+        const owner = auth.register({ handle: 'owner', password: 'first-long-password' });
+        const guest = auth.register({ handle: 'guest', password: 'other-long-password' });
+        auth.setStatus(guest.user.id, 'disabled');
+
+        assert.deepEqual(auth.counts(), { total: 2, active: 1, disabled: 1 });
+        assert.equal(auth.counts().total, auth.list().length);
+        assert.ok(owner.user.id.length > 0);
+    });
+});

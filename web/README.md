@@ -36,7 +36,8 @@ STORY_API_BASE=http://127.0.0.1:9999 npm run dev
 | `/worldbooks` `/worldbooks/:id` | 世界书：导入/新建/删除，逐词条编辑命中与插入的那几个字段 |
 | `/market` `/market/:ownerId/:characterId` | 市场与榜单：搜索、收藏、导入 |
 | `/account` | **你自己的**账户：积分（签到/邀请/流水）、额度（日月/单次/熔断/用量流水）、收藏 |
-| `/admin/settings` `/admin/users` | **管理区**（独立路由树与导航，仅管理员）：全部配置、账号与限额 |
+| `/admin` | **管理区**（独立路由树与导航，仅管理员）概览：模型是否配好、账号数、今日/本月 tokens、积分与市场 |
+| `/admin/settings` `/admin/users` | 全部配置（改完即生效）、账号与限额 |
 
 ## 三条实现上的规矩
 

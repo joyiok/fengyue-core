@@ -12,6 +12,7 @@ import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 
 import { Icon } from '@/components/icons';
+import { PasswordForm } from '@/components/PasswordForm';
 import { Loading, Meter, Notice } from '@/components/ui';
 import { get, post } from '@/lib/api';
 import { clock, count, percent } from '@/lib/format';
@@ -258,6 +259,10 @@ export default function AccountPage(): React.JSX.Element {
                     ))}
                 </div>
             )}
+
+            <div style={{ marginTop: 14 }}>
+                <PasswordForm />
+            </div>
 
             {/* Operator controls live in /admin, on purpose: running the service
                 and using it are different jobs, and mixing them into one screen

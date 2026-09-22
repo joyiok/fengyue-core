@@ -338,6 +338,64 @@ export class BillingService {
         }
     }
 
+    /**
+     * What the operator needs at a glance, across every account: how much has
+     * gone through the gateway and what it is costing.
+     *
+     * Day and month are prefix scans off `created_at`, which is safe because the
+     * timestamps are UTC ISO strings and the boundaries are UTC too.
+     */
+    overview(): {
+        day: UsageTotals;
+        month: UsageTotals;
+        inFlight: { requests: number; reservedTokens: number };
+        recent: { userId: string; chatId: string | null; model: string; totalTokens: number; usageSource: string; createdAt: string }[];
+    } {
+        const now = this.#now();
+
+        const totals = (prefix: string): UsageTotals => {
+            const row = this.#db.prepare(
+                'SELECT COALESCE(SUM(total_tokens), 0) AS tokens, COUNT(*) AS requests FROM usage_ledger WHERE created_at >= ?',
+            ).get(prefix) as { tokens: number | bigint; requests: number | bigint };
+            return { tokens: Number(row.tokens), requests: Number(row.requests) };
+        };
+
+        let requests = 0;
+        let reservedTokens = 0;
+        for (const live of this.#reservations.values()) {
+            requests += live.size;
+            for (const reservation of live.values()) {
+                reservedTokens += reservation.reservedTokens;
+            }
+        }
+
+        const recent = (this.#db.prepare(
+            `SELECT user_id, chat_id, model, total_tokens, usage_source, created_at
+             FROM usage_ledger ORDER BY id DESC LIMIT 10`,
+        ).all() as {
+            user_id: string;
+            chat_id: string | null;
+            model: string;
+            total_tokens: number | bigint;
+            usage_source: string;
+            created_at: string;
+        }[]).map((row) => ({
+            userId: row.user_id,
+            chatId: row.chat_id,
+            model: row.model,
+            totalTokens: Number(row.total_tokens),
+            usageSource: row.usage_source,
+            createdAt: row.created_at,
+        }));
+
+        return {
+            day: totals(utcDay(now)),
+            month: totals(utcMonth(now)),
+            inFlight: { requests, reservedTokens },
+            recent,
+        };
+    }
+
     summary(userId: string): UsageSummary {
         const policy = this.policyFor(userId);
         const usage = this.usageFor(userId);

@@ -163,3 +163,31 @@ test('chats can be written, listed and read back', async () => {
         assert.equal(chat.messages[1]?.mes, '在吗');
     });
 });
+
+test('an explicitly empty world book list means none at all', async () => {
+    await withLibrary(async (library) => {
+        await library.importCard(JSON.stringify(normalizeCard({
+            spec: 'chara_card_v2',
+            data: {
+                name: '林昭',
+                extensions: { world: 'Eldoria' },
+            },
+        })));
+        await library.putWorldbook('Eldoria', { entries: { 0: { uid: 0, key: ['森林'], content: '一片古老森林' } } });
+
+        const card = await library.getCard('林昭');
+
+        // Omitted: the card's primary world, which is how SillyTavern links them.
+        const primary = await library.resolveWorldbooks(card);
+        assert.equal(primary?.id, 'Eldoria');
+
+        // Given, even empty: none. "One book, and not that one" and "no book at
+        // all" are different requests and the caller has to be able to make the
+        // second — this is what lets the UI offer "don't attach a world book".
+        assert.equal(await library.resolveWorldbooks(card, []), null);
+
+        // And an explicit list still wins over the primary world.
+        await library.putWorldbook('Other', { entries: { 0: { uid: 0, key: ['x'], content: 'y' } } });
+        assert.equal((await library.resolveWorldbooks(card, ['Other']))?.id, 'Other');
+    });
+});

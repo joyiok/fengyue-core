@@ -170,6 +170,61 @@ export class AuthService {
         return { user: toUser(row), ...this.#issueToken(row.id) };
     }
 
+    /**
+     * Change a password.
+     *
+     * The current one is required even of the account owner: a live session is
+     * not proof of who you are to the degree that re-keying the account is, and
+     * a stolen cookie must not be able to lock the real owner out.
+     *
+     * Every session is revoked and one fresh token is returned, which is the
+     * point of changing a password: whoever else was holding one is now logged
+     * out, and the caller does not have to sign in again.
+     */
+    changePassword(userId: string, currentPassword: string, newPassword: string): { token: string; expiresAt: string } {
+        const row = this.#db.prepare('SELECT password_hash, password_salt FROM users WHERE id = ?').get(userId) as
+            | { password_hash: string; password_salt: string }
+            | undefined;
+
+        if (row === undefined) {
+            throw new AuthError('not_found', 'no such account', 404);
+        }
+
+        if (!verifyPassword(String(currentPassword ?? ''), row.password_salt, row.password_hash)) {
+            throw new AuthError('invalid_credentials', 'the current password is wrong', 401);
+        }
+
+        this.#rekey(userId, newPassword);
+        return this.#issueToken(userId);
+    }
+
+    /**
+     * Set a password without knowing the old one: account recovery from the
+     * operator's console. Same session revocation, so a recovery also clears out
+     * whoever may have been inside.
+     */
+    resetPassword(userId: string, newPassword: string): void {
+        if (this.get(userId) === null) {
+            throw new AuthError('not_found', 'no such account', 404);
+        }
+
+        this.#rekey(userId, newPassword);
+    }
+
+    #rekey(userId: string, newPassword: string): void {
+        const problem = passwordProblem(newPassword);
+        if (problem !== null) {
+            throw new AuthError('invalid_password', problem, 400);
+        }
+
+        const { hash, salt } = hashPassword(newPassword, this.#kdf);
+
+        this.#db.transaction(() => {
+            this.#db.prepare('UPDATE users SET password_hash = ?, password_salt = ? WHERE id = ?').run(hash, salt, userId);
+            this.logoutAll(userId);
+        });
+    }
+
     #issueToken(userId: string): { token: string; expiresAt: string } {
         const token = randomBytes(32).toString('base64url');
         const createdAt = this.#now();
@@ -255,6 +310,22 @@ export class AuthService {
     count(): number {
         const row = this.#db.prepare('SELECT COUNT(*) AS count FROM users').get() as { count: number | bigint } | undefined;
         return row === undefined ? 0 : Number(row.count);
+    }
+
+    /** Account counts, for the operator's overview. */
+    counts(): { total: number; active: number; disabled: number } {
+        const row = this.#db.prepare(
+            `SELECT COUNT(*) AS total,
+                    SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active,
+                    SUM(CASE WHEN status = 'disabled' THEN 1 ELSE 0 END) AS disabled
+             FROM users`,
+        ).get() as { total: number | bigint; active: number | bigint | null; disabled: number | bigint | null };
+
+        return {
+            total: Number(row.total),
+            active: Number(row.active ?? 0),
+            disabled: Number(row.disabled ?? 0),
+        };
     }
 
     setStatus(userId: string, status: UserStatus): User {

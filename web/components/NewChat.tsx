@@ -32,6 +32,9 @@ export function NewChat({
     const [picked, setPicked] = useState<string | null>(null);
     const [card, setCard] = useState<CharacterCard | null>(null);
     const [worldbooks, setWorldbooks] = useState<WorldbookSummary[]>([]);
+    /** `null` until the book list is in: creating then falls back to the card's
+     *  own link rather than silently dropping it. */
+    const [attached, setAttached] = useState<string[] | null>(null);
     const [greeting, setGreeting] = useState(0);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -56,8 +59,16 @@ export function NewChat({
         ]).then(([detail, books]) => {
             setCard(detail.card);
             setWorldbooks(books.worldbooks);
+            const primary = typeof detail.card.data.extensions?.world === 'string' ? detail.card.data.extensions.world : null;
+            setAttached(primary !== null && books.worldbooks.some((book) => book.id === primary) ? [primary] : []);
         }).catch((caught) => setError(caught instanceof Error ? caught.message : String(caught)));
     }, [picked]);
+
+    const toggleBook = (id: string): void => {
+        setAttached((current) => current === null
+            ? [id]
+            : current.includes(id) ? current.filter((entry) => entry !== id) : [...current, id]);
+    };
 
     const create = async (): Promise<void> => {
         if (picked === null) {
@@ -68,7 +79,13 @@ export function NewChat({
         setError(null);
 
         try {
-            const created = await post<Created>('/chats', { cardId: picked, greetingIndex: greeting });
+            // Always send the list once it is known: an empty one means "no world
+            // book at all", which is a different request from "use the card's".
+            const created = await post<Created>('/chats', {
+                cardId: picked,
+                greetingIndex: greeting,
+                ...(attached === null ? {} : { worldbookIds: attached }),
+            });
             onCreated(created);
         } catch (caught) {
             setError(caught instanceof Error ? caught.message : String(caught));
@@ -87,7 +104,7 @@ export function NewChat({
             <div className="page-head" style={{ marginBottom: 16 }}>
                 <div>
                     <h1 style={{ fontSize: 20 }}>新的对话</h1>
-                    <div className="sub">{picked === null ? '选一个角色' : '选一段开场白'}</div>
+                    <div className="sub">{picked === null ? '选一个角色' : '选开场白和世界书'}</div>
                 </div>
                 <button type="button" className="btn btn-quiet btn-sm" onClick={onClose}>取消</button>
             </div>
@@ -171,15 +188,43 @@ export function NewChat({
                                 </div>
                             ) : null}
 
-                            {linked !== null ? (
-                                <div className="hint" style={{ fontSize: 12, color: 'var(--text-faint)' }}>
-                                    世界书：
-                                    {worldbooks.some((book) => book.id === linked)
-                                        ? <a href={`/worldbooks/${encodeURIComponent(linked)}`} style={{ color: 'var(--lamp)' }}>{linked}</a>
-                                        : `${linked}（未找到）`}
-                                    ，会自动生效。
-                                </div>
-                            ) : null}
+                            <div className="field">
+                                <label>世界书</label>
+                                {worldbooks.length === 0 ? (
+                                    <span className="hint">库里还没有世界书。</span>
+                                ) : (
+                                    <>
+                                        {worldbooks.map((book) => (
+                                            <label
+                                                key={book.id}
+                                                className="row"
+                                                style={{
+                                                    gap: 10,
+                                                    padding: '6px 10px',
+                                                    borderRadius: 'var(--radius-sm)',
+                                                    background: 'var(--ink-1)',
+                                                    cursor: 'pointer',
+                                                    fontSize: 13.5,
+                                                }}
+                                            >
+                                                <input
+                                                    type="checkbox"
+                                                    checked={attached?.includes(book.id) ?? false}
+                                                    onChange={() => toggleBook(book.id)}
+                                                />
+                                                <span className="grow">
+                                                    {book.id}
+                                                    {book.id === linked ? <span className="tag lamp" style={{ marginLeft: 8 }}>卡片默认</span> : null}
+                                                </span>
+                                                <span style={{ color: 'var(--text-faint)', fontSize: 12 }}>{book.entries} 词条</span>
+                                            </label>
+                                        ))}
+                                        <span className="hint">
+                                            都不勾就是一本都不挂。卡片默认勾了 {linked ?? '（这张卡没关联世界书）'}。
+                                        </span>
+                                    </>
+                                )}
+                            </div>
 
                             <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void create()}>
                                 {busy ? '创建中…' : '开始对话'}

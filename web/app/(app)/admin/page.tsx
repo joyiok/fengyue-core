@@ -1,12 +1,11 @@
-import { SettingsPanel } from '@/components/SettingsPanel';
+import { OverviewPanel } from '@/components/OverviewPanel';
 
 /**
- * `/admin` lands on settings — the thing you come here to change most often.
- *
- * This is a real page rather than a redirect to `/admin/settings`: `redirect()`
- * under a client layout comes back as a 200 plus client-side navigation, which
- * is one more thing that can fail silently. Both URLs render the same view.
+ * `/admin` lands on the overview: the one screen that answers "is anyone using
+ * this, and what is it costing". Settings and users are the tabs beside it —
+ * running the service and using it are different jobs, and none of this belongs
+ * on a user's account page.
  */
 export default function AdminHome(): React.JSX.Element {
-    return <SettingsPanel />;
+    return <OverviewPanel />;
 }

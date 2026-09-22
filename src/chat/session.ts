@@ -419,6 +419,27 @@ export class ChatSession {
     }
 
     /**
+     * Replace the text of one message.
+     *
+     * A log edit rather than a turn: nothing is asked of the model and nothing
+     * is charged. It is how "the bot said what I meant, differently" gets fixed
+     * without deleting the exchange and retyping it.
+     *
+     * Rewording and *rerolling* are different actions: to change what the last
+     * reply answers, use `regenerate` with `userMessageOverride`, which keeps the
+     * replaced reply in `previousReplies` instead of dropping it.
+     */
+    editMessage(index: number, text: string): ChatMessage {
+        const message = this.log[index];
+        if (message === undefined) {
+            throw new Error(`no message at index ${index}`);
+        }
+
+        message.mes = text;
+        return message;
+    }
+
+    /**
      * Remove one message from the log.
      *
      * Editing is not a separate operation: change the user message and use

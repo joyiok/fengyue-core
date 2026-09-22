@@ -124,6 +124,17 @@ async function withServer(
     }
 }
 
+async function registerAgain(base: string, handle: string): Promise<{ token: string }> {
+    const response = await fetch(`${base}/api/v1/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ handle, password: `${handle}-long-enough-password` }),
+    });
+    const text = await response.text();
+    assert.equal(response.status, 200, text);
+    return JSON.parse(text) as { token: string };
+}
+
 function bearer(token: string): Record<string, string> {
     return { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
 }
@@ -745,4 +756,66 @@ test('the root answers without a token and does not leak the library path', asyn
     } finally {
         await mock.close();
     }
+});
+
+test('changing a password over HTTP keeps the caller in and everyone else out', async () => {
+    await withServer('http://127.0.0.1:1/never', async ({ base, register }) => {
+        const owner = await register('owner');
+
+        // Two live sessions for one account, as if from two browsers.
+        const sessions = [owner.token, (await registerAgain(base, 'owner')).token];
+
+        const change = await fetch(`${base}/api/v1/me/password`, {
+            method: 'POST',
+            headers: bearer(owner.token),
+            body: JSON.stringify({ currentPassword: 'wrong-on-purpose', newPassword: 'a-brand-new-password' }),
+        });
+        assert.equal(change.status, 401);
+
+        const ok = await fetch(`${base}/api/v1/me/password`, {
+            method: 'POST',
+            headers: bearer(owner.token),
+            body: JSON.stringify({ currentPassword: 'owner-long-enough-password', newPassword: 'a-brand-new-password' }),
+        });
+        const okText = await ok.text();
+        assert.equal(ok.status, 200, okText);
+        const issued = JSON.parse(okText) as { token: string };
+        assert.notEqual(issued.token, owner.token);
+
+        // Both of the sessions that existed before are gone; the new one works.
+        for (const token of sessions) {
+            assert.equal((await fetch(`${base}/api/v1/me`, { headers: bearer(token) })).status, 401);
+        }
+        assert.equal((await fetch(`${base}/api/v1/me`, { headers: bearer(issued.token) })).status, 200);
+    });
+});
+
+test('the overview answers with what an operator needs at a glance', async () => {
+    await withServer('http://127.0.0.1:1/never', async ({ base, register }) => {
+        await register('owner');
+        await register('guest');
+
+        // The first account is the admin, so the second one is a normal user.
+        const guestToken = (await registerAgain(base, 'guest')).token;
+        const view = await fetch(`${base}/api/v1/admin/overview`, { headers: bearer(guestToken) });
+        assert.equal(view.status, 403, 'a normal account cannot read the overview');
+
+        const ownerToken = (await registerAgain(base, 'owner')).token;
+        const adminView = await fetch(`${base}/api/v1/admin/overview`, { headers: bearer(ownerToken) });
+        const adminText = await adminView.text();
+        assert.equal(adminView.status, 200, adminText);
+
+        const body = JSON.parse(adminText) as {
+            accounts: { total: number; active: number };
+            usage: { day: { tokens: number; requests: number }; recent: unknown[] };
+            credits: unknown;
+            model: { configured: boolean };
+        };
+
+        assert.equal(body.accounts.total, 2);
+        assert.equal(body.accounts.active, 2);
+        assert.equal(body.usage.day.tokens, 0);
+        assert.deepEqual(body.usage.recent, []);
+        assert.equal(body.model.configured, false, 'an unconfigured gateway says so instead of throwing');
+    });
 });

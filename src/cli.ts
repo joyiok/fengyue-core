@@ -52,6 +52,7 @@ Commands:
   model                         show the configured model (key redacted)
 
   user add <handle> <password> [--admin]   create an account
+  user passwd <handle> <password>          set a password (revokes every session)
   user list                                accounts with their usage
   user enable|disable <handle>             flip an account's status
   user quota <handle> [--daily N] [--monthly N] [--per-request N]
@@ -463,6 +464,27 @@ async function main(): Promise<number> {
                         });
 
                         console.log(`created ${created.user.handle} (${created.user.role}, id=${created.user.id})`);
+                        return 0;
+                    }
+
+                    // Account recovery from the operator's console: no current
+                    // password is asked for, because whoever has this shell owns
+                    // the box already. It revokes every session just like a
+                    // self-service change, so a recovery also clears out whoever
+                    // may have been inside.
+                    case 'passwd': {
+                        const handle = actionArgs[0];
+                        const newPassword = actionArgs[1];
+                        if (!handle || !newPassword) usage();
+
+                        const target = auth.findByHandle(handle);
+                        if (target === null) {
+                            console.error(`no such account: ${handle}`);
+                            return 1;
+                        }
+
+                        auth.resetPassword(target.id, newPassword);
+                        console.log(`password updated for ${target.handle}; every session was revoked`);
                         return 0;
                     }
 

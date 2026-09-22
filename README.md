@@ -327,6 +327,7 @@ curl -s -X POST localhost:8787/api/v1/chats/linzhao/2026-09-21_22-09-41/messages
 
 ```
 GET    /api/v1/me/credits                      余额、今日收支、最近流水
+POST   /api/v1/me/password                      改密码 {"currentPassword","newPassword"}（吊销全部会话，返回新 token）
 POST   /api/v1/me/checkin                      每日签到（幂等）
 GET    /api/v1/me/invites                      我发出的邀请码
 POST   /api/v1/me/invites                      生成邀请码 {"count":1}
@@ -357,7 +358,9 @@ DELETE /api/v1/worldbooks/:id                  删世界书
 GET    /api/v1/market/:ownerId/:characterId/card.png    已发布卡的头像
 GET    /api/v1/market/:ownerId/:characterId/card.json   已发布卡的完整内容
 DELETE /api/v1/chats/:cardId/:chatName         删一个会话
+PATCH  /api/v1/chats/:cardId/:chatName/messages/:index  改一条消息的内容（日志编辑，不调模型）
 DELETE /api/v1/chats/:cardId/:chatName/messages/:index  删一条消息
+GET    /api/v1/admin/overview               概览：模型是否配好、账号数、今日/本月用量、积分、市场
 GET    /api/v1/admin/settings               全部配置（密钥打码）
 PUT    /api/v1/admin/settings               改配置 {"model.name":"…"}
 POST   /api/v1/admin/settings/reset         改回启动值 {"keys":["…"]}
@@ -367,8 +370,11 @@ PUT    /api/v1/admin/users/:id/status         启用/停用
 ```
 
 `GET /api/v1/chats/:cardId/:chatName` 带 `?offset=&limit=` 可以分页（都不给就是整份，
-响应里的 `total` 始终是全量长度）。改写一条消息不是单独的接口：用 `regenerate` 带
-`message`，被替换的回答会留在 `extra.story.previousReplies` 里。
+响应里的 `total` 始终是全量长度）。
+
+改一条消息是**日志编辑**（`PATCH …/messages/:index`）：不调模型、不计费。而「换一种说法」
+是另一件事：用 `regenerate` 带 `message`，它改的是最后那条回答**在回答谁**，并且把被替换的
+回答留在 `extra.story.previousReplies` 里而不是丢掉。两者是不同的动作，所以是两个接口。
 ```
 
 `GET /` 与 `GET /health` 不需要 token：前者说明这个服务是什么、有哪些接口（还没有账号时会提示先去注册），后者是给探针用的。其余所有数据接口都要 Bearer token 或会话 cookie。

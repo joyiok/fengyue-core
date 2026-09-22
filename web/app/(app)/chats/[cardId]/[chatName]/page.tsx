@@ -15,7 +15,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { Avatar, ConfirmButton, Notice } from '@/components/ui';
 import { Icon } from '@/components/icons';
-import { ApiError, avatarUrl, del, get, post } from '@/lib/api';
+import { ApiError, api, avatarUrl, del, get, post } from '@/lib/api';
 import { count, short } from '@/lib/format';
 import { streamTurn, type TurnEvent } from '@/lib/sse';
 import type { CharacterCard, ChatMessage, PromptStats } from '@/lib/types';
@@ -58,6 +58,8 @@ export default function ChatPage(): React.JSX.Element {
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [done, setDone] = useState<DoneEvent | null>(null);
+    const [editing, setEditing] = useState<number | null>(null);
+    const [draftEdit, setDraftEdit] = useState('');
 
     const controller = useRef<AbortController | null>(null);
     const requestIds = useRef<Map<string, string>>(new Map());
@@ -89,8 +91,8 @@ export default function ChatPage(): React.JSX.Element {
 
         // One request id per attempt at saying something: a retry after a network
         // failure reuses it, so the server can return the reply it already made
-        // instead of paying for a second one.
-        const key = regenerate ? 'regenerate' : text;
+        // instead of paying for a second one. Changing the words is a new attempt.
+        const key = `${regenerate ? 'regenerate' : 'turn'}:${text}`;
         let requestId = requestIds.current.get(key);
         if (requestId === undefined) {
             requestId = crypto.randomUUID();
@@ -108,7 +110,7 @@ export default function ChatPage(): React.JSX.Element {
         try {
             await streamTurn(
                 `/chats/${encodeURIComponent(cardId)}/${encodeURIComponent(chatName)}/${regenerate ? 'regenerate' : 'messages'}`,
-                { ...(regenerate ? {} : { message: text }), requestId },
+                { ...(text === '' ? {} : { message: text }), requestId },
                 (event: TurnEvent) => {
                     if (event.type === 'delta') {
                         setPending((current) => current === null ? current : { ...current, reply: current.reply + event.text });
@@ -168,6 +170,49 @@ export default function ChatPage(): React.JSX.Element {
             void reload().catch(() => undefined);
         }
     }, [busy, card, cardId, chatName, reload]);
+
+    const beginEdit = (index: number, text: string): void => {
+        setEditing(index);
+        setDraftEdit(text);
+    };
+
+    /**
+     * Rewording and rerolling are different actions.
+     *
+     * `reroll` sends the edited words as what the last reply *answers* and rolls
+     * it again — one action, and the replaced reply is kept in `previousReplies`
+     * on the server rather than dropped. It only applies to the user turn that
+     * the last reply answers, which is the only one `regenerate` can reroll.
+     */
+    const saveEdit = async (index: number, reroll: boolean): Promise<void> => {
+        const text = draftEdit.trim();
+        if (text === '') {
+            return;
+        }
+
+        setEditing(null);
+
+        if (reroll) {
+            void send(text, true);
+            return;
+        }
+
+        try {
+            await api(`/chats/${encodeURIComponent(cardId)}/${encodeURIComponent(chatName)}/messages/${index}`, {
+                method: 'PATCH',
+                body: JSON.stringify({ message: text }),
+            });
+            setMessages((current) => current === null ? current : current.map((message, i) => (i === index ? { ...message, mes: text } : message)));
+        } catch (caught) {
+            setError(caught instanceof Error ? caught.message : String(caught));
+        }
+    };
+
+    /** The one user turn that the last reply answers — the only rerollable pair. */
+    const canReroll = (index: number): boolean => {
+        const last = shown.length - 1;
+        return index === last - 1 && shown[index]?.is_user === true && shown[last]?.is_user === false;
+    };
 
     const removeMessage = useCallback(async (index: number): Promise<void> => {
         try {
@@ -234,30 +279,65 @@ export default function ChatPage(): React.JSX.Element {
 
                     {shown.map((message, index) => (
                         <div className="msg" key={`${index}-${message.send_date}`}>
-                            {message.is_user ? (
-                                <div className="line-user">
-                                    <div className="who">{message.name || '你'}</div>
-                                    <div className="said">{message.mes}</div>
+                            {editing === index ? (
+                                <div className="line-edit">
+                                    <textarea
+                                        className="textarea"
+                                        rows={Math.min(14, Math.max(3, draftEdit.split('\n').length + 1))}
+                                        value={draftEdit}
+                                        autoFocus
+                                        onChange={(event) => setDraftEdit(event.target.value)}
+                                    />
+                                    <div className="row row-end" style={{ marginTop: 8, gap: 8 }}>
+                                        {canReroll(index) ? (
+                                            <button type="button" className="btn btn-primary btn-sm" onClick={() => void saveEdit(index, true)}>
+                                                保存并重新生成回答
+                                            </button>
+                                        ) : null}
+                                        <button type="button" className="btn btn-sm" onClick={() => void saveEdit(index, false)}>
+                                            保存
+                                        </button>
+                                        <button type="button" className="btn btn-quiet btn-sm" onClick={() => setEditing(null)}>
+                                            取消
+                                        </button>
+                                    </div>
                                 </div>
                             ) : (
-                                <div className="line-char">
-                                    <div className="who">{message.name || charName}</div>
-                                    <div className="prose">{message.mes}</div>
-                                </div>
-                            )}
+                                <>
+                                    {message.is_user ? (
+                                        <div className="line-user">
+                                            <div className="who">{message.name || '你'}</div>
+                                            <div className="said">{message.mes}</div>
+                                        </div>
+                                    ) : (
+                                        <div className="line-char">
+                                            <div className="who">{message.name || charName}</div>
+                                            <div className="prose">{message.mes}</div>
+                                        </div>
+                                    )}
 
-                            {!busy ? (
-                                <div className="msg-tools">
-                                    <button
-                                        type="button"
-                                        className="btn btn-quiet btn-sm"
-                                        title="删除这条"
-                                        onClick={() => void removeMessage(index)}
-                                    >
-                                        <Icon name="trash" size={14} />
-                                    </button>
-                                </div>
-                            ) : null}
+                                    {!busy ? (
+                                        <div className="msg-tools">
+                                            <button
+                                                type="button"
+                                                className="btn btn-quiet btn-sm"
+                                                title="编辑这条"
+                                                onClick={() => beginEdit(index, message.mes)}
+                                            >
+                                                <Icon name="edit" size={14} />
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className="btn btn-quiet btn-sm"
+                                                title="删除这条"
+                                                onClick={() => void removeMessage(index)}
+                                            >
+                                                <Icon name="trash" size={14} />
+                                            </button>
+                                        </div>
+                                    ) : null}
+                                </>
+                            )}
                         </div>
                     ))}
 

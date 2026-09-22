@@ -18,7 +18,8 @@ import { Notice } from '@/components/ui';
 import { useSession } from '@/components/session';
 
 const TABS = [
-    { href: '/admin', label: '设置' },
+    { href: '/admin', label: '概览' },
+    { href: '/admin/settings', label: '设置' },
     { href: '/admin/users', label: '用户' },
 ];
 
@@ -51,7 +52,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
                         <Link
                             key={tab.href}
                             href={tab.href}
-                            className={`btn btn-sm${pathname === tab.href || (tab.href === '/admin' && pathname === '/admin/settings') ? ' btn-primary' : ''}`}
+                            className={`btn btn-sm${pathname === tab.href ? ' btn-primary' : ''}`}
                         >
                             {tab.label}
                         </Link>

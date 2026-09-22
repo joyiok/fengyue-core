@@ -536,6 +536,29 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                         }
                     }
 
+                    // Change a password. Every session is revoked and one fresh
+                    // token comes back, which is the point: whoever else was
+                    // holding one is logged out, and the caller is not.
+                    if (method === 'POST' && action === 'password') {
+                        if (auth === null) {
+                            return sendJson(response, 400, { error: 'auth_disabled', message: 'this server runs without accounts' });
+                        }
+
+                        const body = JSON.parse((await readBody(request)).toString('utf8') || '{}') as {
+                            currentPassword?: string;
+                            newPassword?: string;
+                        };
+
+                        const issued = auth.changePassword(
+                            user.id,
+                            String(body.currentPassword ?? ''),
+                            String(body.newPassword ?? ''),
+                        );
+
+                        setSessionCookie(response, issued.token, issued.expiresAt, request);
+                        return sendJson(response, 200, issued);
+                    }
+
                     if (method === 'GET' && action === 'favorites') {
                         if (context.market === null || !context.config.marketEnabled) {
                             return sendJson(response, 400, { error: 'market_disabled', message: 'the character market is not enabled on this server' });
@@ -578,6 +601,27 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
 
                     if (user.role !== 'admin') {
                         return sendJson(response, 403, { error: 'forbidden', message: 'admin role required' });
+                    }
+
+                    // What the operator sees first: is anyone using this, and what
+                    // is it costing. Global by design — per-account numbers are on
+                    // the users screen.
+                    if (parts[3] === 'overview' && method === 'GET') {
+                        let model: { configured: boolean; name?: string; endpoint?: string };
+                        try {
+                            const resolved = toModelConfig(context.config.model);
+                            model = { configured: true, name: resolved.model, endpoint: resolved.endpoint };
+                        } catch {
+                            model = { configured: false };
+                        }
+
+                        return sendJson(response, 200, {
+                            accounts: (context.auth as AuthService).counts(),
+                            usage: context.billing?.overview() ?? null,
+                            credits: context.credits?.totals() ?? null,
+                            market: context.market?.counts() ?? null,
+                            model,
+                        });
                     }
 
                     if (parts[3] === 'users') {
@@ -1011,6 +1055,36 @@ export function createServer(contextOrLibrary: ServerContext | Library, options:
                     if (method === 'DELETE' && id !== undefined && sub !== undefined && subId === undefined) {
                         await library.deleteChat(id, sub);
                         return sendJson(response, 200, { character: id, name: sub, deleted: true });
+                    }
+
+                    // Edit one message in place: a log edit, not a turn. Nothing
+                    // is asked of the model and nothing is charged. To change what
+                    // the last reply *answers*, use `regenerate` with a `message`.
+                    if (method === 'PATCH' && id !== undefined && sub !== undefined
+                        && subId === 'messages' && subSub !== undefined) {
+                        const index = Number(subSub);
+                        if (!Number.isInteger(index) || index < 0) {
+                            return sendJson(response, 400, { error: 'message index must be a non-negative integer' });
+                        }
+
+                        const body = JSON.parse((await readBody(request)).toString('utf8') || '{}') as { message?: unknown };
+                        if (typeof body.message !== 'string' || body.message === '') {
+                            return sendJson(response, 400, { error: 'message is required' });
+                        }
+
+                        const session = await ChatSession.load(library, id, sub, {
+                            personaName: personaName(),
+                            memory: context.config.memory,
+                        });
+                        const edited = session.editMessage(index, body.message);
+                        await session.save();
+
+                        return sendJson(response, 200, {
+                            character: id,
+                            name: sub,
+                            index,
+                            message: { name: edited.name, isUser: edited.is_user, mes: edited.mes },
+                        });
                     }
 
                     // Delete one message. Rewording is `regenerate` with a `message`

@@ -150,6 +150,13 @@ export class MarketService {
         return Number(result.changes) > 0;
     }
 
+    /** How much of the market is actually in use, for the operator's overview. */
+    counts(): { published: number; favorites: number } {
+        const shares = this.#db.prepare('SELECT COUNT(*) AS n FROM character_shares').get() as { n: number | bigint };
+        const favorites = this.#db.prepare('SELECT COUNT(*) AS n FROM character_favorites').get() as { n: number | bigint };
+        return { published: Number(shares.n), favorites: Number(favorites.n) };
+    }
+
     isPublic(ownerId: string, characterId: string): boolean {
         const row = this.#db.prepare(
             `SELECT 1 AS ok FROM character_shares

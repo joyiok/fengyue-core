@@ -121,6 +121,19 @@ export class CreditService {
     }
 
     /** What a turn of this many tokens costs. */
+    /** Everything granted and everything spent, across every account. */
+    totals(): { granted: number; spent: number; balance: number } {
+        const row = this.#db.prepare(
+            `SELECT COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) AS granted,
+                    COALESCE(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END), 0) AS spent
+             FROM credit_ledger`,
+        ).get() as { granted: number | bigint; spent: number | bigint };
+
+        const granted = Number(row.granted);
+        const spent = Number(row.spent);
+        return { granted, spent, balance: granted - spent };
+    }
+
     costForTokens(tokens: number): number {
         if (!Number.isFinite(tokens) || tokens <= 0) {
             return 0;

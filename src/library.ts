@@ -311,17 +311,18 @@ export class Library {
      * book name.
      *
      * The tag matters: entry uids are only unique inside one book, and sticky
-     * bookkeeping is keyed by `<book>.<uid>`. Defaults to the card's primary world
-     * (`data.extensions.world`), which is how SillyTavern links them.
+     * bookkeeping is keyed by `<book>.<uid>`. `undefined` falls back to the card's
+     * primary world (`data.extensions.world`), which is how SillyTavern links
+     * them — but a list that is *given* wins even when it is empty, because “one
+     * book, and not that one” and “no book at all” are different requests and the
+     * caller has to be able to make the second.
      *
      * A book that was renamed or deleted is skipped rather than fatal: a broken
      * link must not make the chat unusable.
      */
     async resolveWorldbooks(card: CharacterCard, ids?: string[]): Promise<Worldbook | null> {
         const primary = card.data.extensions?.world;
-        const requested = ids !== undefined && ids.length > 0
-            ? ids
-            : (typeof primary === 'string' && primary.trim() !== '' ? [primary.trim()] : []);
+        const requested = ids ?? (typeof primary === 'string' && primary.trim() !== '' ? [primary.trim()] : []);
 
         if (requested.length === 0) {
             return null;
