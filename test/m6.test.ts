@@ -930,3 +930,81 @@ test('a report is refused against something that is not published', async () => 
         assert.equal(market.isPublic(owner, 'linzhao'), false);
     });
 });
+
+// ------------------------------------------------------- the life of a work
+
+test('a work goes submit -> review -> list, and being refused is not being deleted', async () => {
+    await withDb((db) => {
+        const auth = new AuthService(db, { kdf: FAST_KDF });
+        const market = new MarketService(db);
+        const owner = auth.register({ handle: 'owner', password: PASSWORD }).user.id;
+        const reviewer = auth.register({ handle: 'reviewer', password: PASSWORD }).user.id;
+        const snapshot = { name: '林昭', tags: ['现代'], descriptionLength: 4 };
+
+        // Submitting is not publishing. Nothing is listed by writing a row.
+        market.submit(owner, 'linzhao', snapshot);
+        assert.equal(market.stateOf(owner, 'linzhao'), 'pending');
+        assert.equal(market.get(owner, 'linzhao', reviewer), null, 'a submission is not on the market');
+        assert.equal(market.reviewQueue('pending').length, 1);
+
+        // Being refused keeps the reason, which is the point of a review rather
+        // than a silent delete: the author has to be able to fix it.
+        const rejected = market.review(owner, 'linzhao', reviewer, 'reject', '设定里有别人的真实信息');
+        assert.equal(rejected.status, 'rejected');
+        assert.equal(rejected.reviewNote, '设定里有别人的真实信息');
+        assert.equal(market.get(owner, 'linzhao', reviewer), null);
+        assert.equal(market.reviewQueue('pending').length, 0, 'a decision empties the queue');
+
+        // Fixing it and resubmitting goes round again.
+        market.submit(owner, 'linzhao', { ...snapshot, descriptionLength: 5 });
+        const listed = market.review(owner, 'linzhao', reviewer, 'approve');
+        assert.equal(listed.status, 'public');
+        assert.equal(market.get(owner, 'linzhao', reviewer)?.name, '林昭');
+        assert.equal(listed.publishedAt !== null, true);
+
+        // A withdrawal is reversible: it can be submitted again.
+        assert.equal(market.withdraw(owner, 'linzhao'), true);
+        assert.equal(market.stateOf(owner, 'linzhao'), 'withdrawn');
+        assert.equal(market.get(owner, 'linzhao', reviewer), null);
+    });
+});
+
+test('a timed release waits for its moment, and the listing clock is the lever', async () => {
+    let clock = new Date('2026-03-01T00:00:00.000Z');
+
+    await withDb((db) => {
+        const auth = new AuthService(db, { kdf: FAST_KDF });
+        const market = new MarketService(db, { now: () => clock });
+        const owner = auth.register({ handle: 'owner', password: PASSWORD }).user.id;
+        const reviewer = auth.register({ handle: 'reviewer', password: PASSWORD }).user.id;
+
+        market.submit(owner, 'linzhao', { name: '林昭', tags: [], descriptionLength: 1 }, {
+            scheduledAt: '2026-03-08T00:00:00.000Z',
+            anonymous: true,
+            rating: 'adult',
+        });
+
+        // Review passes, but the author asked for a later release: it waits.
+        const approved = market.review(owner, 'linzhao', reviewer, 'approve');
+        assert.equal(approved.status, 'approved');
+        assert.equal(market.get(owner, 'linzhao', reviewer), null, 'not listed before its time');
+        assert.equal(approved.anonymous, true, 'anonymity travels with the listing');
+        assert.equal(approved.rating, 'adult');
+
+        // There is no timer to be running: the read paths release what is due.
+        clock = new Date('2026-03-09T00:00:00.000Z');
+        const listed = market.reviewQueue('pending');
+        assert.equal(listed.length, 0, 'it is no longer awaiting anything');
+        assert.equal(market.get(owner, 'linzhao', reviewer)?.status, 'public');
+
+        // `published_at` is when it was first released and never moves. The
+        // listing clock is the operator's lever and does.
+        const first = market.get(owner, 'linzhao', reviewer)!;
+        assert.equal(first.publishedAt, '2026-03-09T00:00:00.000Z');
+
+        clock = new Date('2026-04-01T00:00:00.000Z');
+        const bumped = market.setPublishTime(owner, 'linzhao', '2026-04-01T00:00:00.000Z');
+        assert.equal(bumped.publishTime, '2026-04-01T00:00:00.000Z');
+        assert.equal(bumped.publishedAt, '2026-03-09T00:00:00.000Z', 'the record of a first release survives a re-bump');
+    });
+});

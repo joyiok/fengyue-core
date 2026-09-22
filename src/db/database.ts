@@ -204,6 +204,84 @@ const MIGRATIONS: Migration[] = [
             )`,
             `CREATE INDEX IF NOT EXISTS idx_reports_status ON character_reports(status)`,
             `CREATE INDEX IF NOT EXISTS idx_reports_target ON character_reports(owner_id, character_id)`,
+
+            // ---- the life of a published work -------------------------------
+            // A work moves: submit -> review -> list -> withdraw. `published_at`
+            // is when it was *first* published and never changes; `publish_time`
+            // is what the rankings and the "new" sort actually read, because it
+            // is the operator's lever (a scheduled release, a re-bump).
+            //
+            //   pending    submitted, waiting for a human
+            //   approved   passed review, waiting for `scheduled_at` to arrive
+            //   public     listed
+            //   rejected   refused, with a note the author can read
+            //   withdrawn  the author took it down
+            `ALTER TABLE character_shares ADD COLUMN status TEXT NOT NULL DEFAULT 'public'`,
+            `ALTER TABLE character_shares ADD COLUMN submitted_at TEXT`,
+            `ALTER TABLE character_shares ADD COLUMN reviewed_at TEXT`,
+            `ALTER TABLE character_shares ADD COLUMN reviewed_by TEXT`,
+            `ALTER TABLE character_shares ADD COLUMN review_note TEXT`,
+            `ALTER TABLE character_shares ADD COLUMN scheduled_at TEXT`,
+            `ALTER TABLE character_shares ADD COLUMN publish_time TEXT`,
+            `ALTER TABLE character_shares ADD COLUMN primary_version TEXT`,
+            `ALTER TABLE character_shares ADD COLUMN anonymous INTEGER NOT NULL DEFAULT 0`,
+            `ALTER TABLE character_shares ADD COLUMN rating TEXT NOT NULL DEFAULT 'explicit'`,
+            `UPDATE character_shares SET publish_time = COALESCE(published_at, updated_at) WHERE publish_time IS NULL`,
+            `DROP INDEX IF EXISTS idx_shares_public`,
+            `CREATE INDEX IF NOT EXISTS idx_shares_listed ON character_shares(status, publish_time)`,
+            `CREATE INDEX IF NOT EXISTS idx_shares_review ON character_shares(status, submitted_at)`,
+
+            // Versions of one work. The bytes live as PNGs under `versions/` so
+            // any version can be exported or played, exactly like the working
+            // copy; this table is the metadata and the ordering.
+            `CREATE TABLE IF NOT EXISTS character_versions (
+                owner_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                character_id TEXT NOT NULL,
+                version      TEXT NOT NULL,
+                label        TEXT NOT NULL DEFAULT '',
+                note         TEXT NOT NULL DEFAULT '',
+                created_at   TEXT NOT NULL,
+                PRIMARY KEY (owner_id, character_id, version)
+            )`,
+
+            // Mods: reusable pieces a player loads onto a work at play time. A
+            // mod is a prompt fragment plus a world book's worth of entries and
+            // optionally a style sheet.
+            //
+            // `scope` is the interesting one: `shared` (usable on any work) vs
+            // `dedicated` (only selectable inside one work). Which mods a work
+            // accepts is the *author's* call and lives with the card, not here —
+            // see `extensions.story.mods` — because a card has to keep its rules
+            // when it travels to another install.
+            `CREATE TABLE IF NOT EXISTS mods (
+                id                 TEXT PRIMARY KEY,
+                owner_id           TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                name               TEXT NOT NULL,
+                description        TEXT NOT NULL DEFAULT '',
+                visibility         TEXT NOT NULL DEFAULT 'private',
+                scope              TEXT NOT NULL DEFAULT 'shared',
+                bound_character_id TEXT,
+                system_prompt      TEXT NOT NULL DEFAULT '',
+                post_history       TEXT NOT NULL DEFAULT '',
+                worldbook          TEXT NOT NULL DEFAULT '{}',
+                style              TEXT NOT NULL DEFAULT '',
+                tags               TEXT NOT NULL DEFAULT '[]',
+                uses               INTEGER NOT NULL DEFAULT 0,
+                created_at         TEXT NOT NULL,
+                updated_at         TEXT NOT NULL
+            )`,
+            `CREATE INDEX IF NOT EXISTS idx_mods_owner ON mods(owner_id)`,
+            `CREATE INDEX IF NOT EXISTS idx_mods_gallery ON mods(visibility, scope)`,
+
+            // What a reader does not want to see: whole tags, or words that must
+            // not appear in a reply. Kept per user rather than global, because
+            // "小众XP" is taste, not policy.
+            `CREATE TABLE IF NOT EXISTS user_blocks (
+                user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                kind    TEXT NOT NULL,
+                value   TEXT NOT NULL,
+                PRIMARY KEY (user_id, kind, value)
+            )`,
         ],
     },
 ];

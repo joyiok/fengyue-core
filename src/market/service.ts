@@ -12,7 +12,7 @@
  *   2. **Rankings aggregate per day.** `character_stats` holds one row per character
  *      per day, so a windowed ranking is a range scan over a small table instead of
  *      a scan over every raw view/import event.
- *   3. **Public means public.** `get`/`list` expose only `visibility = 'public'`
+ *   3. **Public means public.** `get`/`list` expose only `status = 'public'`
  *      rows. A private character is invisible to everyone but its owner, no matter
  *      how the id is guessed.
  */
@@ -31,15 +31,38 @@ export interface MarketStats {
     score: number;
 }
 
+export type WorkStatus = 'pending' | 'approved' | 'public' | 'rejected' | 'withdrawn';
+
 export interface MarketEntry {
     ownerId: string;
     characterId: string;
     name: string;
     tags: string[];
     descriptionLength: number;
+    /** First publication. Never changes. */
     publishedAt: string | null;
+    /** What the rankings read: the scheduled release, the re-bump, the lever. */
+    publishTime: string | null;
+    status: WorkStatus;
+    submittedAt: string | null;
+    reviewedAt: string | null;
+    reviewNote: string | null;
+    scheduledAt: string | null;
+    /** The author chose not to be named. */
+    anonymous: boolean;
+    rating: string;
+    primaryVersion: string | null;
     stats: MarketStats;
     favorited: boolean;
+}
+
+export interface SubmitOptions {
+    /** Hold the listing until this moment. Review can pass before it arrives. */
+    scheduledAt?: string | null;
+    /** Publish without naming the author. */
+    anonymous?: boolean;
+    rating?: string;
+    primaryVersion?: string | null;
 }
 
 /**
@@ -88,6 +111,10 @@ function toReport(row: ReportRow): CharacterReport {
         resolvedBy: row.resolved_by,
         action: row.action,
     };
+}
+
+function asStatus(value: string): WorkStatus {
+    return value === 'pending' || value === 'approved' || value === 'rejected' || value === 'withdrawn' ? value : 'public';
 }
 
 export interface RankingRow {
@@ -155,21 +182,44 @@ export class MarketService {
     }
 
     /** Publish (or refresh the snapshot of) one of the caller's own characters. */
-    publish(ownerId: string, characterId: string, snapshot: PublishSnapshot): MarketEntry {
-        const now = this.#now().toISOString();
+    /**
+     * Submit a work for review.
+     *
+     * Nothing is listed by writing a row: it goes to `pending` and a human looks
+     * at it first. That is the difference between a market and a paste bin, and
+     * it is also the only place a takedown has to happen *before* something is
+     * public rather than after somebody complains.
+     */
+    submit(
+        ownerId: string,
+        characterId: string,
+        snapshot: PublishSnapshot,
+        options: SubmitOptions = {},
+    ): MarketEntry {
+        const now = this.#now();
+        const stamp = now.toISOString();
+        const scheduled = options.scheduledAt === undefined || options.scheduledAt === null || options.scheduledAt === ''
+            ? null
+            : new Date(options.scheduledAt).toISOString();
 
         this.#db.prepare(
             `INSERT INTO character_shares
-                (user_id, character_id, visibility, name, tags, description_length, published_at, updated_at)
-             VALUES (?, ?, 'public', ?, ?, ?, ?, ?)
+                (user_id, character_id, visibility, name, tags, description_length, published_at, publish_time,
+                 status, submitted_at, scheduled_at, anonymous, rating, primary_version, updated_at)
+             VALUES (?, ?, 'private', ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
              ON CONFLICT (user_id, character_id) DO UPDATE SET
-                visibility = 'public',
                 name = excluded.name,
                 tags = excluded.tags,
                 description_length = excluded.description_length,
-                -- keep the original publish time so re-publishing does not jump the
-                -- character to the top of "new"
-                published_at = COALESCE(character_shares.published_at, excluded.published_at),
+                status = 'pending',
+                submitted_at = excluded.submitted_at,
+                reviewed_at = NULL,
+                reviewed_by = NULL,
+                review_note = NULL,
+                scheduled_at = excluded.scheduled_at,
+                anonymous = excluded.anonymous,
+                rating = excluded.rating,
+                primary_version = COALESCE(excluded.primary_version, character_shares.primary_version),
                 updated_at = excluded.updated_at`,
         ).run(
             ownerId,
@@ -177,25 +227,172 @@ export class MarketService {
             snapshot.name,
             snapshot.tags.join(','),
             Math.max(0, Math.trunc(snapshot.descriptionLength)),
-            now,
-            now,
+            // Neither clock is set here. `published_at` (the record of a first
+            // release) and `publish_time` (the listing clock) are both written
+            // when the work is actually listed — by `review`, or by the
+            // scheduled release that `#promote` performs.
+            null,
+            null,
+            stamp,
+            scheduled,
+            options.anonymous === true ? 1 : 0,
+            options.rating ?? 'explicit',
+            options.primaryVersion ?? null,
+            stamp,
         );
 
-        const entry = this.get(ownerId, characterId, ownerId);
-        if (entry === null) {
-            throw new MarketError('not_published', 'character could not be published', 500);
-        }
-
-        return entry;
+        return this.requireEntry(ownerId, characterId);
     }
 
-    unpublish(ownerId: string, characterId: string): boolean {
+    /**
+     * The reviewer's decision.
+     *
+     * Approving lists it — unless the author asked for a timed release and the
+     * moment has not arrived, in which case it waits in `approved` and the read
+     * paths promote it when its time comes. Rejecting keeps the note the author
+     * needs to read, which is the whole point of a review rather than a delete.
+     */
+    review(
+        ownerId: string,
+        characterId: string,
+        moderatorId: string,
+        decision: 'approve' | 'reject',
+        note = '',
+    ): MarketEntry {
+        const now = this.#now();
+        const stamp = now.toISOString();
+        const row = this.#db.prepare(
+            'SELECT scheduled_at FROM character_shares WHERE user_id = ? AND character_id = ?',
+        ).get(ownerId, characterId) as { scheduled_at: string | null } | undefined;
+
+        if (row === undefined) {
+            throw new MarketError('not_published', 'no such submission', 404);
+        }
+
+        let status: WorkStatus;
+        if (decision === 'reject') {
+            status = 'rejected';
+        } else {
+            const scheduled = row.scheduled_at === null ? null : Date.parse(row.scheduled_at);
+            status = scheduled !== null && Number.isFinite(scheduled) && scheduled > now.getTime()
+                ? 'approved'
+                : 'public';
+        }
+
+        this.#db.prepare(
+            `UPDATE character_shares
+             SET status = ?, reviewed_at = ?, reviewed_by = ?, review_note = ?,
+                 visibility = ?, publish_time = CASE WHEN ? = 'public' THEN ? ELSE publish_time END,
+                 published_at = CASE WHEN ? = 'public' THEN COALESCE(published_at, ?) ELSE published_at END,
+                 updated_at = ?
+             WHERE user_id = ? AND character_id = ?`,
+        ).run(
+            status, stamp, moderatorId, note,
+            status === 'public' ? 'public' : 'private',
+            status, stamp,
+            status, stamp,
+            stamp, ownerId, characterId,
+        );
+
+        return this.requireEntry(ownerId, characterId);
+    }
+
+    /** The author takes it down. Reversible: it can be submitted again. */
+    withdraw(ownerId: string, characterId: string): boolean {
         const result = this.#db.prepare(
-            `UPDATE character_shares SET visibility = 'private', updated_at = ?
-             WHERE user_id = ? AND character_id = ? AND visibility = 'public'`,
+            `UPDATE character_shares SET status = 'withdrawn', visibility = 'private', updated_at = ?
+             WHERE user_id = ? AND character_id = ? AND status IN ('public', 'approved', 'pending')`,
         ).run(this.#now().toISOString(), ownerId, characterId);
 
         return Number(result.changes) > 0;
+    }
+
+    /**
+     * Move the listing's clock. This is the operator's lever: a re-bump, a
+     * corrected time. `published_at` — when it was first published — never
+     * moves, so the record of a first release survives every re-bump.
+     */
+    setPublishTime(ownerId: string, characterId: string, when: string): MarketEntry {
+        const at = new Date(when);
+        if (Number.isNaN(at.getTime())) {
+            throw new MarketError('not_published', 'publish time must be an ISO date', 400);
+        }
+
+        this.#db.prepare(
+            'UPDATE character_shares SET publish_time = ?, updated_at = ? WHERE user_id = ? AND character_id = ?',
+        ).run(at.toISOString(), this.#now().toISOString(), ownerId, characterId);
+
+        return this.requireEntry(ownerId, characterId);
+    }
+
+    /** What state a work is in, for the author's own screen. */
+    stateOf(ownerId: string, characterId: string): WorkStatus | null {
+        const row = this.#db.prepare(
+            'SELECT status FROM character_shares WHERE user_id = ? AND character_id = ?',
+        ).get(ownerId, characterId) as { status: string } | undefined;
+
+        return row === undefined ? null : asStatus(row.status);
+    }
+
+    /** The review queue. `all` is the audit trail. */
+    reviewQueue(status: 'pending' | 'all' = 'pending'): MarketEntry[] {
+        this.#promote(this.#now().toISOString());
+
+        const rows = (status === 'all'
+            ? this.#db.prepare('SELECT * FROM character_shares ORDER BY submitted_at DESC LIMIT 200').all()
+            : this.#db.prepare("SELECT * FROM character_shares WHERE status = 'pending' ORDER BY submitted_at ASC LIMIT 200").all()
+        ) as unknown as (ShareRow & { user_id: string })[];
+
+        // The queue is a work list, not a reader's screen: nobody's favorites
+        // are relevant to whether something should be listed.
+        const stats = this.#aggregate('all');
+        const favorites = new Set<string>();
+        return rows.map((row) => this.#toEntry(row.user_id, row, stats, favorites));
+    }
+
+    /**
+     * Release the timed ones.
+     *
+     * Done on read rather than by a timer: a listing is the only thing a missed
+     * release affects, so this is the only place it matters, and it needs no
+     * background process to be running.
+     */
+    #promote(now: string): void {
+        this.#db.prepare(
+            `UPDATE character_shares
+             SET status = 'public', visibility = 'public', publish_time = ?,
+                 published_at = COALESCE(published_at, ?), updated_at = ?
+             WHERE status = 'approved' AND scheduled_at IS NOT NULL AND scheduled_at <= ?`,
+        ).run(now, now, now, now);
+    }
+
+    /** The one-step path: submit and approve. For the CLI and the tests. */
+    publish(ownerId: string, characterId: string, snapshot: PublishSnapshot, options: SubmitOptions = {}): MarketEntry {
+        this.submit(ownerId, characterId, snapshot, options);
+        return this.review(ownerId, characterId, 'system', 'approve');
+    }
+
+    /**
+     * Read a work back whatever state it is in.
+     *
+     * `get` is the reader's door and only opens on `public`; the submit and
+     * review steps need to see their own result *before* that, so they read
+     * through here instead.
+     */
+    requireEntry(ownerId: string, characterId: string): MarketEntry {
+        const row = this.#db.prepare(
+            'SELECT * FROM character_shares WHERE user_id = ? AND character_id = ?',
+        ).get(ownerId, characterId) as unknown as (ShareRow & { user_id: string }) | undefined;
+
+        if (row === undefined) {
+            throw new MarketError('not_published', 'character could not be read back', 500);
+        }
+
+        return this.#toEntry(ownerId, row, this.#aggregate('all'), this.#favoriteKeys(ownerId));
+    }
+
+    unpublish(ownerId: string, characterId: string): boolean {
+        return this.withdraw(ownerId, characterId);
     }
 
     /** How much of the market is actually in use, for the operator's overview. */
@@ -283,7 +480,7 @@ export class MarketService {
     isPublic(ownerId: string, characterId: string): boolean {
         const row = this.#db.prepare(
             `SELECT 1 AS ok FROM character_shares
-             WHERE user_id = ? AND character_id = ? AND visibility = 'public'`,
+             WHERE user_id = ? AND character_id = ? AND status = 'public'`,
         ).get(ownerId, characterId) as { ok: number | bigint } | undefined;
 
         return row !== undefined;
@@ -293,7 +490,7 @@ export class MarketService {
     listByOwner(ownerId: string, requesterId?: string): MarketEntry[] {
         const rows = this.#db.prepare(
             `SELECT character_id, name, tags, description_length, published_at
-             FROM character_shares WHERE user_id = ? AND visibility = 'public'
+             FROM character_shares WHERE user_id = ? AND status = 'public'
              ORDER BY published_at DESC, character_id ASC`,
         ).all(ownerId) as unknown as ShareRow[];
 
@@ -305,9 +502,8 @@ export class MarketService {
 
     get(ownerId: string, characterId: string, requesterId?: string): MarketEntry | null {
         const row = this.#db.prepare(
-            `SELECT character_id, name, tags, description_length, published_at
-             FROM character_shares
-             WHERE user_id = ? AND character_id = ? AND visibility = 'public'`,
+            `SELECT * FROM character_shares
+             WHERE user_id = ? AND character_id = ? AND status = 'public'`,
         ).get(ownerId, characterId) as ShareRow | undefined;
 
         if (row === undefined) {
@@ -337,7 +533,7 @@ export class MarketService {
         const offset = Math.max(0, Math.trunc(options.offset ?? 0));
         const sort = options.sort ?? 'hot';
 
-        const where: string[] = ["visibility = 'public'"];
+        const where: string[] = ["status = 'public'"];
         const params: (string | number)[] = [];
 
         const query = options.q?.trim();
@@ -362,7 +558,7 @@ export class MarketService {
                 : 'name ASC'; // re-sorted by score below
 
         const rows = this.#db.prepare(
-            `SELECT user_id, character_id, name, tags, description_length, published_at
+            `SELECT *
              FROM character_shares WHERE ${where.join(' AND ')}
              ORDER BY ${order} LIMIT ? OFFSET ?`,
         ).all(...params, limit, offset) as unknown as (ShareRow & { user_id: string })[];
@@ -385,8 +581,7 @@ export class MarketService {
         const stats = this.#aggregate(window);
 
         const shared = this.#db.prepare(
-            `SELECT user_id, character_id, name, tags, published_at
-             FROM character_shares WHERE visibility = 'public'`,
+            `SELECT * FROM character_shares WHERE status = 'public'`,
         ).all() as unknown as (ShareRow & { user_id: string })[];
 
         const rows: RankingRow[] = [];
@@ -479,10 +674,10 @@ export class MarketService {
     /** The characters this user favorited, most recent first. */
     favoritesFor(userId: string, limit = 50): MarketEntry[] {
         const rows = this.#db.prepare(
-            `SELECT s.user_id, s.character_id, s.name, s.tags, s.description_length, s.published_at, f.created_at AS favorited_at
+            `SELECT s.*, f.created_at AS favorited_at
              FROM character_favorites f
              JOIN character_shares s
-               ON s.user_id = f.owner_id AND s.character_id = f.character_id AND s.visibility = 'public'
+               ON s.user_id = f.owner_id AND s.character_id = f.character_id AND s.status = 'public'
              WHERE f.user_id = ?
              ORDER BY f.created_at DESC LIMIT ?`,
         ).all(userId, Math.max(1, Math.min(200, Math.trunc(limit)))) as unknown as (ShareRow & { user_id: string })[];
@@ -560,6 +755,15 @@ export class MarketService {
             tags: parseTags(row.tags),
             descriptionLength: Number(row.description_length),
             publishedAt: row.published_at,
+            publishTime: row.publish_time,
+            status: asStatus(row.status),
+            submittedAt: row.submitted_at,
+            reviewedAt: row.reviewed_at,
+            reviewNote: row.review_note,
+            scheduledAt: row.scheduled_at,
+            primaryVersion: row.primary_version,
+            anonymous: Number(row.anonymous) === 1,
+            rating: row.rating,
             stats: stats.get(`${ownerId}/${row.character_id}`) ?? emptyStats(),
             favorited: favorites.has(`${ownerId}/${row.character_id}`),
         };
@@ -572,4 +776,13 @@ interface ShareRow {
     tags: string;
     description_length: number | bigint;
     published_at: string | null;
+    publish_time: string | null;
+    status: string;
+    submitted_at: string | null;
+    reviewed_at: string | null;
+    review_note: string | null;
+    scheduled_at: string | null;
+    primary_version: string | null;
+    anonymous: number | bigint;
+    rating: string;
 }
